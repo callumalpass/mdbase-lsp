@@ -1,0 +1,10 @@
+target/
+
+# Ralph Loop files
+PROMPT.md
+AGENTS.md
+PROGRESS.md
+loop.sh
+
+# Editor artifacts
+.vscode/
