@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - vscode-target: linux-x64
+            rust-target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            binary: mdbase-lsp
+            archive: mdbase-lsp-linux-x64.tar.gz
+          - vscode-target: darwin-x64
+            rust-target: x86_64-apple-darwin
+            runner: macos-13
+            binary: mdbase-lsp
+            archive: mdbase-lsp-darwin-x64.tar.gz
+          - vscode-target: darwin-arm64
+            rust-target: aarch64-apple-darwin
+            runner: macos-latest
+            binary: mdbase-lsp
+            archive: mdbase-lsp-darwin-arm64.tar.gz
+          - vscode-target: win32-x64
+            rust-target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            binary: mdbase-lsp.exe
+            archive: mdbase-lsp-win32-x64.zip
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout mdbase-lsp
+        uses: actions/checkout@v4
+
+      - name: Checkout mdbase-rs
+        uses: actions/checkout@v4
+        with:
+          repository: callumalpass/mdbase-rs
+          path: ../mdbase-rs
+
+      - name: Install Rust
+        uses: dtolnay/rust-action/setup@v1
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Build LSP binary
+        run: cargo build --release --target ${{ matrix.rust-target }}
+
+      - name: Copy binary into extension
+        shell: bash
+        run: |
+          mkdir -p editors/vscode/server
+          cp target/${{ matrix.rust-target }}/release/${{ matrix.binary }} editors/vscode/server/
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build extension
+        working-directory: editors/vscode
+        run: |
+          npm ci
+          npm run compile
+
+      - name: Package VSIX
+        working-directory: editors/vscode
+        run: npx @vscode/vsce package --target ${{ matrix.vscode-target }}
+
+      - name: Create binary archive (Unix)
+        if: runner.os != 'Windows'
+        run: tar czf ${{ matrix.archive }} -C target/${{ matrix.rust-target }}/release ${{ matrix.binary }}
+
+      - name: Create binary archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/${{ matrix.rust-target }}/release/${{ matrix.binary }} -DestinationPath ${{ matrix.archive }}
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix-${{ matrix.vscode-target }}
+          path: editors/vscode/*.vsix
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.vscode-target }}
+          path: ${{ matrix.archive }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.vsix
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+          generate_release_notes: true

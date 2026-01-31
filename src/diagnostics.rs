@@ -2,6 +2,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::Client;
 
 use crate::state::BackendState;
+use crate::text;
 
 /// Validate the document and publish diagnostics.
 pub async fn publish(client: &Client, state: &BackendState, uri: &Url) {
@@ -10,7 +11,21 @@ pub async fn publish(client: &Client, state: &BackendState, uri: &Url) {
         return;
     }
 
-    let diagnostics = compute(state, uri);
+    let Some(collection) = state.get_collection() else {
+        return;
+    };
+    let Some(text) = state.document_text(uri) else {
+        return;
+    };
+    let Ok(file_path) = uri.to_file_path() else {
+        return;
+    };
+    let rel_path = match file_path.strip_prefix(&collection.root) {
+        Ok(p) => p.to_string_lossy().to_string().replace('\\', "/"),
+        Err(_) => return,
+    };
+
+    let diagnostics = compute(&collection, &text, &rel_path);
     client.publish_diagnostics(uri.clone(), diagnostics, None).await;
 }
 
@@ -18,13 +33,68 @@ pub async fn publish(client: &Client, state: &BackendState, uri: &Url) {
 ///
 /// TODO: Use mdbase library to parse frontmatter, resolve types, and validate.
 /// Map mdbase::errors::Issue → LSP Diagnostic.
-fn compute(_state: &BackendState, _uri: &Url) -> Vec<Diagnostic> {
-    // Stub: no diagnostics yet.
-    // Implementation will:
-    // 1. Get document content from state.documents
-    // 2. Parse frontmatter using mdbase::frontmatter::parser
-    // 3. Determine types using mdbase::matching::engine
-    // 4. Validate using mdbase::validation::validator
-    // 5. Map each Issue to a Diagnostic
-    Vec::new()
+fn compute(collection: &mdbase::Collection, text: &str, rel_path: &str) -> Vec<Diagnostic> {
+    let parsed = text::parse_frontmatter(text);
+    if parsed.parse_error {
+        return vec![Diagnostic {
+            range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String("invalid_frontmatter".to_string())),
+            source: Some("mdbase".to_string()),
+            message: "Failed to parse YAML frontmatter".to_string(),
+            ..Default::default()
+        }];
+    }
+
+    if parsed.mapping_error {
+        return vec![Diagnostic {
+            range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String("invalid_frontmatter".to_string())),
+            source: Some("mdbase".to_string()),
+            message: "Frontmatter must be a YAML mapping".to_string(),
+            ..Default::default()
+        }];
+    }
+
+    let result = collection.validate_op(&serde_json::json!({
+        "path": rel_path,
+        "frontmatter": parsed.json,
+    }));
+
+    let issues = result.get("issues").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let mut diagnostics = Vec::new();
+    let fallback_line = text::frontmatter_bounds(text).map(|(s, _)| s).unwrap_or(0);
+
+    for issue in issues {
+        let code = issue.get("code").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let message = issue.get("message").and_then(|v| v.as_str()).unwrap_or("Validation issue");
+        let severity_str = issue.get("severity").and_then(|v| v.as_str()).unwrap_or("error");
+        let severity = match severity_str {
+            "warning" => DiagnosticSeverity::WARNING,
+            "info" => DiagnosticSeverity::INFORMATION,
+            _ => DiagnosticSeverity::ERROR,
+        };
+
+        let range = if let Some(field) = issue.get("field").and_then(|v| v.as_str()) {
+            let (start, end) = text::find_field_range(text, field, fallback_line);
+            Range::new(start, end)
+        } else {
+            Range::new(
+                Position::new(fallback_line as u32, 0),
+                Position::new(fallback_line as u32, 0),
+            )
+        };
+
+        diagnostics.push(Diagnostic {
+            range,
+            severity: Some(severity),
+            code: Some(NumberOrString::String(code.to_string())),
+            source: Some("mdbase".to_string()),
+            message: message.to_string(),
+            ..Default::default()
+        });
+    }
+
+    diagnostics
 }

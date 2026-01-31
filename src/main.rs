@@ -3,11 +3,13 @@ use tracing_subscriber::EnvFilter;
 
 mod commands;
 mod completions;
+mod collection_utils;
 mod diagnostics;
 mod goto;
 mod hover;
 mod server;
 mod state;
+mod text;
 
 #[tokio::main]
 async fn main() {

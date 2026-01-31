@@ -1,0 +1,64 @@
+{
+  "name": "mdbase",
+  "displayName": "mdbase",
+  "description": "Language support for mdbase markdown collections",
+  "version": "0.1.0",
+  "publisher": "mdbase",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:markdown"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mdbase.createFile",
+        "title": "mdbase: Create File"
+      },
+      {
+        "command": "mdbase.validateCollection",
+        "title": "mdbase: Validate Collection"
+      }
+    ],
+    "configuration": {
+      "title": "mdbase",
+      "properties": {
+        "mdbase.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the mdbase-lsp binary. If empty, looks in target/release then target/debug."
+        },
+        "mdbase.logLevel": {
+          "type": "string",
+          "default": "info",
+          "enum": [
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace"
+          ],
+          "description": "Log level for the mdbase-lsp server."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.1.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.0.0"
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "package": "npx @vscode/vsce package"
+  }
+}

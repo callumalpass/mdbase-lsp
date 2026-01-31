@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout mdbase-lsp
+        uses: actions/checkout@v4
+
+      - name: Checkout mdbase-rs
+        uses: actions/checkout@v4
+        with:
+          repository: callumalpass/mdbase-rs
+          path: ../mdbase-rs
+
+      - name: Install Rust
+        uses: dtolnay/rust-action/setup@v1
+
+      - name: Cargo check
+        run: cargo check
+
+      - name: Cargo test
+        run: cargo test
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build extension
+        working-directory: editors/vscode
+        run: |
+          npm ci
+          npm run compile
