@@ -794,6 +794,7 @@ dependencies = [
 name = "mdbase-lsp"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dashmap 6.1.0",
  "mdbase",
  "ropey",
@@ -1154,6 +1155,7 @@ version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",

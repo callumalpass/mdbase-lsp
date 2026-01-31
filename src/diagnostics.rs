@@ -1,3 +1,4 @@
+use tracing::{debug, warn};
 use tower_lsp::lsp_types::*;
 use tower_lsp::Client;
 
@@ -12,17 +13,23 @@ pub async fn publish(client: &Client, state: &BackendState, uri: &Url) {
     }
 
     let Some(collection) = state.get_collection() else {
+        warn!(uri = %uri, "diagnostics: no collection available");
         return;
     };
     let Some(text) = state.document_text(uri) else {
+        warn!(uri = %uri, "diagnostics: no document text");
         return;
     };
     let Ok(file_path) = uri.to_file_path() else {
+        warn!(uri = %uri, "diagnostics: cannot convert URI to file path");
         return;
     };
     let rel_path = match file_path.strip_prefix(&collection.root) {
         Ok(p) => p.to_string_lossy().to_string().replace('\\', "/"),
-        Err(_) => return,
+        Err(_) => {
+            debug!(uri = %uri, root = %collection.root.display(), "diagnostics: file outside collection root");
+            return;
+        }
     };
 
     let diagnostics = compute(&collection, &text, &rel_path);

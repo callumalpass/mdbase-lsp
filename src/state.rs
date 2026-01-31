@@ -1,6 +1,7 @@
 use dashmap::DashMap;
 use ropey::Rope;
 use tower_lsp::lsp_types::Url;
+use tracing::{info, warn};
 
 use std::sync::Arc;
 
@@ -34,14 +35,25 @@ impl BackendState {
         if let Some(existing) = self.collection.read().unwrap().as_ref() {
             return Some(existing.clone());
         }
-        let root = self.collection_root.read().unwrap().clone()?;
+        let root = match self.collection_root.read().unwrap().clone() {
+            Some(r) => r,
+            None => {
+                warn!("get_collection: collection_root is None");
+                return None;
+            }
+        };
+        info!(root = %root.display(), "get_collection: opening collection");
         match Collection::open(&root) {
             Ok(collection) => {
+                info!(types = collection.types.len(), "get_collection: loaded collection");
                 let arc = Arc::new(collection);
                 *self.collection.write().unwrap() = Some(arc.clone());
                 Some(arc)
             }
-            Err(_) => None,
+            Err(e) => {
+                warn!(root = %root.display(), error = %e, "get_collection: Collection::open failed");
+                None
+            }
         }
     }
 

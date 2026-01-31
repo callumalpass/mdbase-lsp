@@ -11,7 +11,9 @@
     "Programming Languages"
   ],
   "activationEvents": [
-    "onLanguage:markdown"
+    "onLanguage:markdown",
+    "onCommand:mdbase.createFile",
+    "onCommand:mdbase.validateCollection"
   ],
   "main": "./out/extension.js",
   "contributes": {

@@ -1,16 +1,16 @@
 import * as path from "path";
 import * as fs from "fs";
 import {
+  commands,
   ExtensionContext,
   workspace,
-  commands,
   window,
 } from "vscode";
 import {
+  ExecuteCommandRequest,
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
-  ExecuteCommandRequest,
 } from "vscode-languageclient/node";
 
 let client: LanguageClient | undefined;
@@ -67,23 +67,80 @@ export async function activate(context: ExtensionContext): Promise<void> {
     clientOptions
   );
 
-  const registerCommand = (command: string) =>
-    commands.registerCommand(command, async () => {
+  context.subscriptions.push(client);
+
+  await client.start();
+
+  context.subscriptions.push(
+    commands.registerCommand("mdbase.createFile", async () => {
       if (!client) {
         return;
       }
-      await client.sendRequest(ExecuteCommandRequest.type, {
-        command,
-        arguments: [],
-      });
-    });
 
-  context.subscriptions.push(
-    registerCommand("mdbase.createFile"),
-    registerCommand("mdbase.validateCollection")
+      // Discover available types from _types/ folder
+      const folders = workspace.workspaceFolders;
+      const typesDir = folders?.[0]
+        ? path.join(folders[0].uri.fsPath, "_types")
+        : undefined;
+      let typeNames: string[] = [];
+      if (typesDir && fs.existsSync(typesDir)) {
+        typeNames = fs
+          .readdirSync(typesDir)
+          .filter((f) => f.endsWith(".md"))
+          .map((f) => f.replace(/\.md$/, ""));
+      }
+
+      let typeName: string | undefined;
+      if (typeNames.length > 0) {
+        typeName = await window.showQuickPick(typeNames, {
+          placeHolder: "Select a type",
+        });
+      } else {
+        typeName = await window.showInputBox({
+          prompt: "Type name",
+          placeHolder: "e.g. zettel",
+        });
+      }
+      if (!typeName) {
+        return;
+      }
+
+      const filePath = await window.showInputBox({
+        prompt: "File path (relative to collection root)",
+        placeHolder: "e.g. notes/my-note.md",
+      });
+      if (!filePath) {
+        return;
+      }
+
+      await client.sendRequest(ExecuteCommandRequest.type, {
+        command: "mdbase.createFile",
+        arguments: [{ type: typeName, path: filePath, frontmatter: {} }],
+      });
+    })
   );
 
-  await client.start();
+  context.subscriptions.push(
+    commands.registerCommand("mdbase.validateCollection", async () => {
+      if (!client) {
+        return;
+      }
+
+      const result = await client.sendRequest(ExecuteCommandRequest.type, {
+        command: "mdbase.validateCollection",
+        arguments: [],
+      });
+
+      if (result) {
+        const output = window.createOutputChannel("mdbase validation");
+        output.clear();
+        output.appendLine(JSON.stringify(result, null, 2));
+        output.show();
+      } else {
+        window.showInformationMessage("mdbase: collection is valid");
+      }
+    })
+  );
 }
 
 export async function deactivate(): Promise<void> {

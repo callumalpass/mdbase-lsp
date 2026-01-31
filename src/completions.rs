@@ -1,3 +1,4 @@
+use tracing::{debug, warn};
 use tower_lsp::lsp_types::*;
 
 use crate::collection_utils;
@@ -18,36 +19,90 @@ pub fn provide(
     uri: &Url,
     position: Position,
 ) -> Option<CompletionResponse> {
-    let collection = state.get_collection()?;
-    let text = state.document_text(uri)?;
+    let collection = match state.get_collection() {
+        Some(c) => c,
+        None => {
+            warn!(uri = %uri, "completion: no collection available");
+            return None;
+        }
+    };
+    let text = match state.document_text(uri) {
+        Some(t) => t,
+        None => {
+            warn!(uri = %uri, "completion: no document text");
+            return None;
+        }
+    };
     let line_idx = position.line as usize;
     let line_text = text.lines().nth(line_idx).unwrap_or("").to_string();
     let column = position.character as usize;
 
     let in_frontmatter = text::is_in_frontmatter(&text, line_idx);
+    if !in_frontmatter {
+        debug!(uri = %uri, line = line_idx, "completion: not in frontmatter");
+    }
     if in_frontmatter {
+        let colon_idx = line_text.find(':');
+        let is_field_name_pos = colon_idx.is_none() || column <= colon_idx.unwrap_or(0);
+
         let parsed = text::parse_frontmatter(&text);
+
+        // When typing a new field name the incomplete line makes YAML invalid.
+        // Remove the current line and re-parse so we can still offer field names.
+        if (parsed.parse_error || parsed.mapping_error) && is_field_name_pos {
+            debug!(uri = %uri, "completion: frontmatter invalid, trying with current line removed");
+            let patched = text::parse_frontmatter(&remove_line(&text, line_idx));
+            if patched.parse_error || patched.mapping_error {
+                debug!(uri = %uri, "completion: still invalid after removing line");
+                return None;
+            }
+            let rel_path = uri.to_file_path().ok()
+                .and_then(|p| p.strip_prefix(&collection.root).ok().map(|r| r.to_string_lossy().to_string().replace('\\', "/")));
+            let type_names = collection.determine_types_for_path(&patched.json, rel_path.as_deref());
+            debug!(uri = %uri, ?type_names, "completion: resolved types (patched)");
+            let existing: std::collections::HashSet<String> = patched.json.as_object()
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
+            let fields = fields_for_types(&collection, &type_names);
+            let items: Vec<CompletionItem> = fields.into_iter()
+                .filter(|(name, _)| !existing.contains(name))
+                .map(|(name, def)| {
+                    let mut item = CompletionItem::new_simple(name.clone(), field_detail(&def));
+                    item.kind = Some(CompletionItemKind::FIELD);
+                    item
+                }).collect();
+            return Some(CompletionResponse::Array(items));
+        }
+
         if parsed.parse_error || parsed.mapping_error {
+            debug!(uri = %uri, "completion: frontmatter parse/mapping error (value position)");
             return None;
         }
 
         let rel_path = uri.to_file_path().ok()
             .and_then(|p| p.strip_prefix(&collection.root).ok().map(|r| r.to_string_lossy().to_string().replace('\\', "/")));
         let type_names = collection.determine_types_for_path(&parsed.json, rel_path.as_deref());
+        debug!(uri = %uri, ?type_names, "completion: resolved types");
 
-        let colon_idx = line_text.find(':');
-        if colon_idx.is_none() || column <= colon_idx.unwrap_or(0) {
+        if is_field_name_pos {
+            let existing: std::collections::HashSet<String> = parsed.json.as_object()
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
             let fields = fields_for_types(&collection, &type_names);
-            let items: Vec<CompletionItem> = fields.into_iter().map(|(name, def)| {
-                let mut item = CompletionItem::new_simple(name.clone(), field_detail(&def));
-                item.kind = Some(CompletionItemKind::FIELD);
-                item
-            }).collect();
+            let items: Vec<CompletionItem> = fields.into_iter()
+                .filter(|(name, _)| !existing.contains(name))
+                .map(|(name, def)| {
+                    let mut item = CompletionItem::new_simple(name.clone(), field_detail(&def));
+                    item.kind = Some(CompletionItemKind::FIELD);
+                    item
+                }).collect();
             return Some(CompletionResponse::Array(items));
         }
 
         if let Some(field_name) = text::field_name_from_line(&line_text) {
+            debug!(uri = %uri, field_name = %field_name, "completion: looking up field def for value completion");
             if let Some(field_def) = field_def_for_types(&collection, &type_names, &field_name) {
+                debug!(uri = %uri, field_name = %field_name, field_type = %field_def.field_type, has_values = field_def.values.is_some(), "completion: found field def");
                 if let Some(values) = &field_def.values {
                     let items = values.iter().map(|v| CompletionItem {
                         label: v.clone(),
@@ -68,7 +123,11 @@ pub fn provide(
                     let items = link_target_completions(&collection, target_type.as_deref());
                     return Some(CompletionResponse::Array(items));
                 }
+            } else {
+                debug!(uri = %uri, field_name = %field_name, "completion: no field def found");
             }
+        } else {
+            debug!(uri = %uri, line_text = %line_text, "completion: could not extract field name from line");
         }
     } else if column > 0 {
         let prefix = line_text.chars().take(column).collect::<String>();
@@ -196,6 +255,16 @@ fn link_target_completions(
     }
 
     items
+}
+
+/// Remove a single line from text by index, preserving all other lines.
+fn remove_line(text: &str, line_idx: usize) -> String {
+    text.lines()
+        .enumerate()
+        .filter(|(i, _)| *i != line_idx)
+        .map(|(_, l)| l)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn tag_completions(collection: &mdbase::Collection) -> Vec<CompletionItem> {
