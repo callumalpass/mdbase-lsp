@@ -101,6 +101,11 @@ impl BackendState {
         }
     }
 
+    /// Drop the cached collection so the next `get_collection()` reloads from disk.
+    pub fn invalidate_collection(&self) {
+        *self.collection.write().unwrap() = None;
+    }
+
     pub fn document_text(&self, uri: &Url) -> Option<String> {
         self.documents.get(uri).map(|r| r.rope.to_string())
     }

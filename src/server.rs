@@ -225,6 +225,12 @@ impl LanguageServer for MdbaseLanguageServer {
             }
         }
 
+        // Reload collection when a type definition changes.
+        if uri.path().contains("/_types/") {
+            info!("type file changed, reloading collection");
+            self.state.invalidate_collection();
+        }
+
         // Cancel any pending debounced diagnostics from did_change
         self.state.bump_generation(&uri);
 
