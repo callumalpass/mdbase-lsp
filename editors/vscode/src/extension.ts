@@ -107,17 +107,72 @@ export async function activate(context: ExtensionContext): Promise<void> {
         return;
       }
 
+      // Query typeInfo for prompt fields
+      let promptFields: Array<{
+        name: string;
+        type: string;
+        description?: string;
+        values?: string[];
+      }> = [];
+      try {
+        const typeInfoResult = await client.sendRequest(
+          ExecuteCommandRequest.type,
+          {
+            command: "mdbase.typeInfo",
+            arguments: [{ type: typeName }],
+          }
+        );
+        promptFields =
+          (typeInfoResult as Record<string, unknown>)?.prompt_fields as typeof promptFields ?? [];
+      } catch (e) {
+        window.showWarningMessage(
+          `mdbase: typeInfo failed: ${e instanceof Error ? e.message : e}`
+        );
+      }
+
       const filePath = await window.showInputBox({
-        prompt: "File path (relative to collection root)",
-        placeHolder: "e.g. notes/my-note.md",
+        prompt: "File path (blank to auto-generate)",
+        placeHolder: "e.g. notes/my-note.md (leave empty to auto-generate)",
       });
-      if (!filePath) {
+      if (filePath === undefined) {
         return;
+      }
+
+      // Prompt for each required field
+      const frontmatter: Record<string, string> = {};
+      for (const field of promptFields) {
+        let value: string | undefined;
+        const label = field.description
+          ? `${field.name} (${field.description})`
+          : field.name;
+
+        if (field.values && field.values.length > 0) {
+          value = await window.showQuickPick(field.values, {
+            placeHolder: label,
+          });
+        } else {
+          value = await window.showInputBox({ prompt: label });
+        }
+        if (value === undefined) {
+          return;
+        }
+        if (value !== "") {
+          frontmatter[field.name] = value;
+        }
+      }
+
+      // Build args — only include path if non-empty
+      const createArgs: Record<string, unknown> = {
+        type: typeName,
+        frontmatter,
+      };
+      if (filePath !== "") {
+        createArgs.path = filePath;
       }
 
       await client.sendRequest(ExecuteCommandRequest.type, {
         command: "mdbase.createFile",
-        arguments: [{ type: typeName, path: filePath, frontmatter: {} }],
+        arguments: [createArgs],
       });
     })
   );
