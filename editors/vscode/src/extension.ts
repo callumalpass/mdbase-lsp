@@ -73,7 +73,9 @@ export async function activate(context: ExtensionContext): Promise<void> {
 
   context.subscriptions.push(
     commands.registerCommand("mdbase.createFile", async () => {
+      window.showInformationMessage("mdbase: createFile command invoked");
       if (!client) {
+        window.showErrorMessage("mdbase: no client");
         return;
       }
 

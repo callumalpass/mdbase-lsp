@@ -5,6 +5,7 @@ mod commands;
 mod completions;
 mod collection_utils;
 mod diagnostics;
+mod file_index;
 mod goto;
 mod hover;
 mod server;

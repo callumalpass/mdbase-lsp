@@ -1,19 +1,12 @@
 use tracing::{debug, warn};
 use tower_lsp::lsp_types::*;
 
-use crate::collection_utils;
 use crate::state::BackendState;
 use crate::text;
 
 use mdbase::types::schema::FieldDef;
 
 /// Provide completions at the given position.
-///
-/// TODO: Implement:
-/// - Field name completions (when cursor is at start of a frontmatter line)
-/// - Enum value completions (when cursor is after a known enum field's colon)
-/// - Link target completions (when cursor is inside [[ ]] or []())
-/// - Tag completions (when cursor is after #)
 pub fn provide(
     state: &BackendState,
     uri: &Url,
@@ -45,7 +38,9 @@ pub fn provide(
         let colon_idx = line_text.find(':');
         let is_field_name_pos = colon_idx.is_none() || column <= colon_idx.unwrap_or(0);
 
-        let parsed = text::parse_frontmatter(&text);
+        let parsed = state.documents.get(uri)
+            .map(|doc| doc.frontmatter())
+            .unwrap_or_else(|| text::parse_frontmatter(&text));
 
         // When typing a new field name the incomplete line makes YAML invalid.
         // Remove the current line and re-parse so we can still offer field names.
@@ -120,7 +115,7 @@ pub fn provide(
                 }
                 if is_link_field(&field_def) {
                     let target_type = link_target_type(&field_def);
-                    let items = link_target_completions(&collection, target_type.as_deref());
+                    let items = link_target_completions(state, target_type.as_deref());
                     return Some(CompletionResponse::Array(items));
                 }
             } else {
@@ -132,7 +127,7 @@ pub fn provide(
     } else if column > 0 {
         let prefix = line_text.chars().take(column).collect::<String>();
         if prefix.ends_with('#') {
-            let items = tag_completions(&collection);
+            let items = tag_completions(state);
             return Some(CompletionResponse::Array(items));
         }
     }
@@ -220,41 +215,17 @@ fn link_target_type(def: &FieldDef) -> Option<String> {
 }
 
 fn link_target_completions(
-    collection: &mdbase::Collection,
+    state: &BackendState,
     target_type: Option<&str>,
 ) -> Vec<CompletionItem> {
-    let files = collection_utils::scan_collection_files(collection);
-    let mut items = Vec::new();
-
-    for path in files {
-        let rel_path = match path.strip_prefix(&collection.root) {
-            Ok(p) => p.to_string_lossy().to_string().replace('\\', "/"),
-            Err(_) => continue,
-        };
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let parsed = text::parse_frontmatter(&content);
-        if parsed.parse_error || parsed.mapping_error {
-            continue;
-        }
-        if let Some(tt) = target_type {
-            let types = collection.determine_types_for_path(&parsed.json, Some(&rel_path));
-            if !types.iter().any(|t| t.eq_ignore_ascii_case(tt)) {
-                continue;
-            }
-        }
-
-        let label = rel_path.clone();
-        items.push(CompletionItem {
-            label,
+    state.file_index.link_targets(target_type)
+        .into_iter()
+        .map(|rel_path| CompletionItem {
+            label: rel_path,
             kind: Some(CompletionItemKind::FILE),
             ..Default::default()
-        });
-    }
-
-    items
+        })
+        .collect()
 }
 
 /// Remove a single line from text by index, preserving all other lines.
@@ -267,40 +238,9 @@ fn remove_line(text: &str, line_idx: usize) -> String {
         .join("\n")
 }
 
-fn tag_completions(collection: &mdbase::Collection) -> Vec<CompletionItem> {
-    let files = collection_utils::scan_collection_files(collection);
-    let mut tags: Vec<String> = Vec::new();
-
-    for path in files {
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let parsed_doc = mdbase::frontmatter::parser::parse_document(&content);
-        let fm_json = text::parse_frontmatter(&content);
-        if let Some(arr) = fm_json.json.get("tags").and_then(|v| v.as_array()) {
-            for tag_val in arr {
-                if let Some(tag) = tag_val.as_str() {
-                    if !tags.contains(&tag.to_string()) {
-                        tags.push(tag.to_string());
-                    }
-                }
-            }
-        } else if let Some(tag) = fm_json.json.get("tags").and_then(|v| v.as_str()) {
-            if !tags.contains(&tag.to_string()) {
-                tags.push(tag.to_string());
-            }
-        }
-        let body_tags = mdbase::expressions::evaluator::extract_tags_from_body(&parsed_doc.body);
-        for tag in body_tags {
-            if !tags.contains(&tag) {
-                tags.push(tag);
-            }
-        }
-    }
-
-    tags.sort();
-    tags.into_iter()
+fn tag_completions(state: &BackendState) -> Vec<CompletionItem> {
+    state.file_index.all_tags()
+        .into_iter()
         .map(|tag| CompletionItem {
             label: tag,
             kind: Some(CompletionItemKind::KEYWORD),

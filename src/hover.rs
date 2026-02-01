@@ -21,7 +21,9 @@ pub fn provide(
     let column = position.character as usize;
 
     if text::is_in_frontmatter(&text, line_idx) {
-        let parsed = text::parse_frontmatter(&text);
+        let parsed = state.documents.get(uri)
+            .map(|doc| doc.frontmatter())
+            .unwrap_or_else(|| text::parse_frontmatter(&text));
         if parsed.parse_error || parsed.mapping_error {
             return None;
         }

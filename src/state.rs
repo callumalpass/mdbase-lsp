@@ -3,9 +3,45 @@ use ropey::Rope;
 use tower_lsp::lsp_types::Url;
 use tracing::{info, warn};
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use mdbase::Collection;
+
+use crate::file_index::FileIndex;
+use crate::text::ParsedFrontmatter;
+
+/// Per-document state: rope content + cached frontmatter.
+pub struct DocumentState {
+    pub rope: Rope,
+    cached_frontmatter: Mutex<Option<ParsedFrontmatter>>,
+}
+
+impl DocumentState {
+    pub fn new(rope: Rope) -> Self {
+        Self {
+            rope,
+            cached_frontmatter: Mutex::new(None),
+        }
+    }
+
+    /// Get cached frontmatter, parsing lazily if needed.
+    pub fn frontmatter(&self) -> ParsedFrontmatter {
+        let mut cache = self.cached_frontmatter.lock().unwrap();
+        if let Some(ref cached) = *cache {
+            return cached.clone();
+        }
+        let text = self.rope.to_string();
+        let parsed = crate::text::parse_frontmatter(&text);
+        *cache = Some(parsed.clone());
+        parsed
+    }
+
+    /// Invalidate cached frontmatter (call after rope mutations).
+    pub fn invalidate_frontmatter(&self) {
+        *self.cached_frontmatter.lock().unwrap() = None;
+    }
+}
 
 /// Shared backend state for the LSP server.
 ///
@@ -19,7 +55,13 @@ pub struct BackendState {
     pub collection: std::sync::RwLock<Option<Arc<Collection>>>,
 
     /// In-memory content of open documents, keyed by URI.
-    pub documents: DashMap<Url, Rope>,
+    pub documents: DashMap<Url, DocumentState>,
+
+    /// Generation counter per document for debouncing diagnostics.
+    pub diagnostics_generation: DashMap<Url, Arc<AtomicU64>>,
+
+    /// Cached file index for completions.
+    pub file_index: FileIndex,
 }
 
 impl BackendState {
@@ -28,6 +70,8 @@ impl BackendState {
             collection_root: std::sync::RwLock::new(None),
             collection: std::sync::RwLock::new(None),
             documents: DashMap::new(),
+            diagnostics_generation: DashMap::new(),
+            file_index: FileIndex::new(),
         }
     }
 
@@ -58,6 +102,19 @@ impl BackendState {
     }
 
     pub fn document_text(&self, uri: &Url) -> Option<String> {
-        self.documents.get(uri).map(|r| r.to_string())
+        self.documents.get(uri).map(|r| r.rope.to_string())
+    }
+
+    /// Get the diagnostics generation counter for a URI, creating it if needed.
+    pub fn generation_counter(&self, uri: &Url) -> Arc<AtomicU64> {
+        self.diagnostics_generation
+            .entry(uri.clone())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone()
+    }
+
+    /// Bump the generation counter and return the new value.
+    pub fn bump_generation(&self, uri: &Url) -> u64 {
+        self.generation_counter(uri).fetch_add(1, Ordering::SeqCst) + 1
     }
 }

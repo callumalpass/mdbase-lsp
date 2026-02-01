@@ -1,20 +1,23 @@
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
 use tracing::{info, warn};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::state::BackendState;
+use crate::state::{BackendState, DocumentState};
 
 pub struct MdbaseLanguageServer {
     client: Client,
-    state: BackendState,
+    state: Arc<BackendState>,
 }
 
 impl MdbaseLanguageServer {
     pub fn new(client: Client) -> Self {
         Self {
             client,
-            state: BackendState::new(),
+            state: Arc::new(BackendState::new()),
         }
     }
 }
@@ -66,10 +69,7 @@ impl LanguageServer for MdbaseLanguageServer {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec![
-                        "mdbase.createFile".into(),
-                        "mdbase.validateCollection".into(),
-                    ],
+                    commands: vec![],
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -82,6 +82,14 @@ impl LanguageServer for MdbaseLanguageServer {
         self.client
             .log_message(MessageType::INFO, "mdbase LSP initialized")
             .await;
+
+        // Build the file index in the background
+        let state = Arc::clone(&self.state);
+        tokio::task::spawn_blocking(move || {
+            if let Some(collection) = state.get_collection() {
+                state.file_index.rebuild(&collection);
+            }
+        });
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -91,30 +99,46 @@ impl LanguageServer for MdbaseLanguageServer {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
-        self.state.documents.insert(uri.clone(), ropey::Rope::from_str(&text));
+        self.state.documents.insert(uri.clone(), DocumentState::new(ropey::Rope::from_str(&text)));
+        // Immediate diagnostics on open
         crate::diagnostics::publish(&self.client, &self.state, &uri).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
-        // For incremental sync, apply changes to the rope
+        // Apply incremental changes to the rope
         if let Some(mut doc) = self.state.documents.get_mut(&uri) {
             for change in params.content_changes {
                 if let Some(range) = change.range {
-                    let start = offset_from_position(&doc, range.start);
-                    let end = offset_from_position(&doc, range.end);
-                    doc.remove(start..end);
-                    doc.insert(start, &change.text);
+                    let start = offset_from_position(&doc.rope, range.start);
+                    let end = offset_from_position(&doc.rope, range.end);
+                    doc.rope.remove(start..end);
+                    doc.rope.insert(start, &change.text);
                 } else {
-                    *doc = ropey::Rope::from_str(&change.text);
+                    doc.rope = ropey::Rope::from_str(&change.text);
                 }
             }
+            doc.invalidate_frontmatter();
         }
-        crate::diagnostics::publish(&self.client, &self.state, &uri).await;
+
+        // Debounced diagnostics: bump generation, spawn delayed task
+        let gen = self.state.bump_generation(&uri);
+        let counter = self.state.generation_counter(&uri);
+        let client = self.client.clone();
+        let state = Arc::clone(&self.state);
+        let uri_clone = uri.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            if counter.load(Ordering::SeqCst) == gen {
+                crate::diagnostics::publish(&client, &state, &uri_clone).await;
+            }
+        });
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        self.state.documents.remove(&params.text_document.uri);
+        let uri = &params.text_document.uri;
+        self.state.documents.remove(uri);
+        self.state.diagnostics_generation.remove(uri);
     }
 
     async fn will_save_wait_until(
@@ -192,11 +216,23 @@ impl LanguageServer for MdbaseLanguageServer {
             if let Ok(new_text) = std::fs::read_to_string(&file_path) {
                 self.state
                     .documents
-                    .insert(uri.clone(), ropey::Rope::from_str(&new_text));
+                    .insert(uri.clone(), DocumentState::new(ropey::Rope::from_str(&new_text)));
             }
         }
 
+        // Cancel any pending debounced diagnostics from did_change
+        self.state.bump_generation(&uri);
+
+        // Immediate diagnostics on save
         crate::diagnostics::publish(&self.client, &self.state, &uri).await;
+
+        // Rebuild file index in the background
+        let state = Arc::clone(&self.state);
+        tokio::task::spawn_blocking(move || {
+            if let Some(collection) = state.get_collection() {
+                state.file_index.rebuild(&collection);
+            }
+        });
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {

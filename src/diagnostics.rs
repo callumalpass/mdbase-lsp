@@ -32,7 +32,8 @@ pub async fn publish(client: &Client, state: &BackendState, uri: &Url) {
         }
     };
 
-    let diagnostics = compute(&collection, &text, &rel_path);
+    let cached = state.documents.get(uri).map(|doc| doc.frontmatter());
+    let diagnostics = compute(&collection, &text, &rel_path, cached);
     client.publish_diagnostics(uri.clone(), diagnostics, None).await;
 }
 
@@ -40,8 +41,8 @@ pub async fn publish(client: &Client, state: &BackendState, uri: &Url) {
 ///
 /// TODO: Use mdbase library to parse frontmatter, resolve types, and validate.
 /// Map mdbase::errors::Issue → LSP Diagnostic.
-fn compute(collection: &mdbase::Collection, text: &str, rel_path: &str) -> Vec<Diagnostic> {
-    let parsed = text::parse_frontmatter(text);
+fn compute(collection: &mdbase::Collection, text: &str, rel_path: &str, cached: Option<text::ParsedFrontmatter>) -> Vec<Diagnostic> {
+    let parsed = cached.unwrap_or_else(|| text::parse_frontmatter(text));
     if parsed.parse_error {
         return vec![Diagnostic {
             range: Range::new(Position::new(0, 0), Position::new(0, 0)),
