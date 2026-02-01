@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-mdbase = { path = "../mdbase-rs" }
+mdbase = { git = "https://github.com/callumalpass/mdbase-rs" }
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
