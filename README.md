@@ -105,10 +105,17 @@ vim.api.nvim_create_user_command("MdbaseCreateFile", function()
 
   local function on_type(type_name)
     if not type_name or type_name == "" then return end
-    client:request("workspace/executeCommand", {
-      command = "mdbase.createFile",
-      arguments = { { type = type_name, frontmatter = {} } },
-    })
+    vim.ui.input({ prompt = "File path (blank to auto-generate): " }, function(file_path)
+      if file_path == nil then return end
+      local args = { type = type_name, frontmatter = {} }
+      if file_path ~= "" then
+        args.path = file_path
+      end
+      client:request("workspace/executeCommand", {
+        command = "mdbase.createFile",
+        arguments = { args },
+      })
+    end)
   end
 
   if #type_names > 0 then
@@ -119,12 +126,12 @@ vim.api.nvim_create_user_command("MdbaseCreateFile", function()
 end, {})
 ```
 
-This scans `_types/` for available types, prompts for a type, then sends
-the command to the LSP server. The server generates field values (e.g.
-ULID for `zettelid`), derives the filename from the type's
-`filename_pattern`, creates the file, and opens it via `showDocument`.
-Plugins like `dressing.nvim` or `telescope` will enhance the
-`vim.ui.select` and `vim.ui.input` prompts.
+This scans `_types/` for available types, prompts for a type, then asks
+for a file path. If left blank the server derives the filename from the
+type's `filename_pattern` (e.g. `{zettelid}.md`), generating field
+values as needed. The server then creates the file and opens it via
+`showDocument`. Plugins like `dressing.nvim` or `telescope` will enhance
+the `vim.ui.select` and `vim.ui.input` prompts.
 
 ## Notes
 
