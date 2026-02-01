@@ -1,5 +1,6 @@
 use mdbase::frontmatter::parser::{is_parse_error, parse_document, yaml_mapping_to_json};
 
+#[derive(Clone)]
 pub(crate) struct ParsedFrontmatter {
     pub json: serde_json::Value,
     pub has_frontmatter: bool,
@@ -114,15 +115,17 @@ pub(crate) fn find_field_range(
 }
 
 pub(crate) fn word_at(line: &str, column: usize) -> Option<String> {
-    if column >= line.len() {
+    if line.is_empty() {
         return None;
     }
+    // Clamp column to last valid index so cursor at end-of-line still finds the word
+    let col = column.min(line.len().saturating_sub(1));
     let bytes = line.as_bytes();
-    let mut start = column;
+    let mut start = col;
     while start > 0 && is_word_char(bytes[start - 1]) {
         start -= 1;
     }
-    let mut end = column;
+    let mut end = col;
     while end < bytes.len() && is_word_char(bytes[end]) {
         end += 1;
     }
@@ -135,4 +138,191 @@ pub(crate) fn word_at(line: &str, column: usize) -> Option<String> {
 
 fn is_word_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+
+// ---------------------------------------------------------------------------
+// Link detection at cursor position
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub(crate) struct LinkAtCursor {
+    pub target: String,
+    pub start_col: usize,
+    pub end_col: usize,
+}
+
+/// Scan `line_idx` of `text` for a link that spans `column`.
+///
+/// Detects `[[target]]`, `![[target]]`, `[text](path)`, `![alt](path)`.
+/// Skips external URLs (`http://`, `https://`).
+pub(crate) fn link_at_position(text: &str, line_idx: usize, column: usize) -> Option<LinkAtCursor> {
+    let line = text.lines().nth(line_idx)?;
+    let chars: Vec<char> = line.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // Wikilink / embed: [[target]] or ![[target]]
+        if i + 1 < len && chars[i] == '[' && chars[i + 1] == '[' {
+            let link_start = if i > 0 && chars[i - 1] == '!' { i - 1 } else { i };
+            i += 2; // skip [[
+            let content_start = i;
+            while i < len && !(chars[i] == ']' && i + 1 < len && chars[i + 1] == ']') {
+                i += 1;
+            }
+            if i < len {
+                let content: String = chars[content_start..i].iter().collect();
+                let link_end = i + 2; // past ]]
+                i = link_end;
+
+                if column >= link_start && column < link_end {
+                    let target = content.split('|').next().unwrap_or(&content);
+                    let target = target.split('#').next().unwrap_or(target).trim();
+                    if !target.is_empty() {
+                        return Some(LinkAtCursor {
+                            target: target.to_string(),
+                            start_col: link_start,
+                            end_col: link_end,
+                        });
+                    }
+                }
+            } else {
+                break;
+            }
+            continue;
+        }
+
+        // Markdown link / image: [text](path) or ![alt](path)
+        if chars[i] == '[' {
+            let link_start = if i > 0 && chars[i - 1] == '!' { i - 1 } else { i };
+            i += 1; // skip [
+            let mut bracket_depth = 1;
+            while i < len && bracket_depth > 0 {
+                if chars[i] == '[' { bracket_depth += 1; }
+                if chars[i] == ']' { bracket_depth -= 1; }
+                i += 1;
+            }
+            // Expect (path) immediately after ]
+            if i < len && chars[i] == '(' {
+                i += 1; // skip (
+                let paren_start = i;
+                let mut paren_depth = 1;
+                while i < len && paren_depth > 0 {
+                    if chars[i] == '(' { paren_depth += 1; }
+                    if chars[i] == ')' { paren_depth -= 1; }
+                    i += 1;
+                }
+                let path: String = chars[paren_start..i - 1].iter().collect();
+                let link_end = i;
+
+                if column >= link_start && column < link_end {
+                    let path = path.trim();
+                    if !path.is_empty()
+                        && !path.starts_with("http://")
+                        && !path.starts_with("https://")
+                    {
+                        let target = path.split('#').next().unwrap_or(path).to_string();
+                        if !target.is_empty() {
+                            return Some(LinkAtCursor {
+                                target,
+                                start_col: link_start,
+                                end_col: link_end,
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+            continue;
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Frontmatter value extraction
+// ---------------------------------------------------------------------------
+
+/// Extract the value portion of a frontmatter line if the cursor is past the
+/// field delimiter.
+///
+/// - `field: value` → returns `"value"` (trimmed) when cursor is past `:`
+/// - `  - value`    → returns `"value"` (trimmed) when cursor is past `-`
+pub(crate) fn value_from_frontmatter_line(line: &str, column: usize) -> Option<String> {
+    let trimmed = line.trim_start();
+    let leading = line.len() - trimmed.len();
+
+    // `field: value` form
+    if let Some(colon_idx) = trimmed.find(':') {
+        let abs_colon = leading + colon_idx;
+        if column > abs_colon {
+            let value = trimmed[colon_idx + 1..].trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+        return None;
+    }
+
+    // `  - value` form (list item)
+    if trimmed.starts_with('-') {
+        let after_dash = &trimmed[1..];
+        let dash_abs = leading; // position of the dash
+        let value_start = dash_abs + 1 + (after_dash.len() - after_dash.trim_start().len());
+        if column > dash_abs {
+            let value = after_dash.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+        let _ = value_start; // suppress unused warning
+        return None;
+    }
+
+    None
+}
+
+/// Find the field name that owns the value on `line_idx`.
+///
+/// For `field: value` lines, returns the field name directly.
+/// For list items (`  - value`), walks backwards to find the parent `field:` line.
+pub(crate) fn field_name_for_position(text: &str, line_idx: usize) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let line = lines.get(line_idx)?;
+    let trimmed = line.trim_start();
+
+    // Direct `field: value` line
+    if let Some(colon_idx) = trimmed.find(':') {
+        let name = trimmed[..colon_idx].trim();
+        if !name.is_empty() && !name.starts_with('-') {
+            return Some(name.to_string());
+        }
+    }
+
+    // List item — walk backwards to find the parent field
+    if trimmed.starts_with('-') {
+        let item_indent = line.len() - trimmed.len();
+        for prev_idx in (0..line_idx).rev() {
+            let prev = lines[prev_idx];
+            let prev_trimmed = prev.trim_start();
+            let prev_indent = prev.len() - prev_trimmed.len();
+
+            // Must be less indented and have a colon
+            if prev_indent < item_indent {
+                if let Some(colon_idx) = prev_trimmed.find(':') {
+                    let name = prev_trimmed[..colon_idx].trim();
+                    if !name.is_empty() && !name.starts_with('-') {
+                        return Some(name.to_string());
+                    }
+                }
+                // If less indented but no colon, stop searching
+                break;
+            }
+        }
+    }
+
+    None
 }
