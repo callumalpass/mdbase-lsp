@@ -80,9 +80,31 @@ vim.lsp.enable("mdbase")
 #### Commands
 
 Create a `:MdbaseCreateFile` user command to invoke `mdbase.createFile` via
-the LSP:
+the LSP.  The command calls `mdbase.typeInfo` first to discover which fields
+need user input (required, no default, no generated strategy), then prompts
+for each before creating the file.
 
 ```lua
+-- Prompt for a list of fields sequentially, then call done(values).
+local function prompt_fields(fields, idx, values, done)
+  if idx > #fields then
+    done(values)
+    return
+  end
+  local field = fields[idx]
+  local label = field.name
+  if field.description and field.description ~= "" then
+    label = label .. " (" .. field.description .. ")"
+  end
+  vim.ui.input({ prompt = label .. ": " }, function(value)
+    if value == nil then return end
+    if value ~= "" then
+      values[field.name] = value
+    end
+    prompt_fields(fields, idx + 1, values, done)
+  end)
+end
+
 vim.api.nvim_create_user_command("MdbaseCreateFile", function()
   local clients = vim.lsp.get_clients({ name = "mdbase" })
   if #clients == 0 then
@@ -103,35 +125,56 @@ vim.api.nvim_create_user_command("MdbaseCreateFile", function()
     end
   end
 
-  local function on_type(type_name)
-    if not type_name or type_name == "" then return end
-    vim.ui.input({ prompt = "File path (blank to auto-generate): " }, function(file_path)
-      if file_path == nil then return end
-      local args = { type = type_name, frontmatter = {} }
-      if file_path ~= "" then
-        args.path = file_path
+  local function create_with_type(type_name)
+    client:request("workspace/executeCommand", {
+      command = "mdbase.typeInfo",
+      arguments = { { type = type_name } },
+    }, function(err, result)
+      if err then
+        vim.schedule(function()
+          vim.notify("mdbase: " .. tostring(err), vim.log.levels.ERROR)
+        end)
+        return
       end
-      client:request("workspace/executeCommand", {
-        command = "mdbase.createFile",
-        arguments = { args },
-      })
+      local fields = (result and result.prompt_fields) or {}
+
+      vim.schedule(function()
+        vim.ui.input({ prompt = "File path (blank to auto-generate): " }, function(file_path)
+          if file_path == nil then return end
+
+          prompt_fields(fields, 1, {}, function(values)
+            local fm = next(values) and values or vim.empty_dict()
+            local args = { type = type_name, frontmatter = fm }
+            if file_path ~= "" then
+              args.path = file_path
+            end
+            client:request("workspace/executeCommand", {
+              command = "mdbase.createFile",
+              arguments = { args },
+            })
+          end)
+        end)
+      end)
     end)
   end
 
   if #type_names > 0 then
-    vim.ui.select(type_names, { prompt = "Select a type:" }, on_type)
+    vim.ui.select(type_names, { prompt = "Select a type:" }, function(type_name)
+      if not type_name or type_name == "" then return end
+      create_with_type(type_name)
+    end)
   else
-    vim.ui.input({ prompt = "Type name: " }, on_type)
+    vim.ui.input({ prompt = "Type name: " }, function(type_name)
+      if not type_name or type_name == "" then return end
+      create_with_type(type_name)
+    end)
   end
 end, {})
 ```
 
-This scans `_types/` for available types, prompts for a type, then asks
-for a file path. If left blank the server derives the filename from the
-type's `filename_pattern` (e.g. `{zettelid}.md`), generating field
-values as needed. The server then creates the file and opens it via
-`showDocument`. Plugins like `dressing.nvim` or `telescope` will enhance
-the `vim.ui.select` and `vim.ui.input` prompts.
+The flow is: select type → optional file path → prompted for any required
+fields without defaults → file created and opened. Plugins like
+`dressing.nvim` or `telescope` will enhance the prompts.
 
 ## Notes
 

@@ -15,6 +15,7 @@ pub async fn execute(
     let args: &[serde_json::Value] = &params.arguments;
     match params.command.as_str() {
         "mdbase.createFile" => create_file(client, state, args).await,
+        "mdbase.typeInfo" => type_info(state, args).await,
         "mdbase.validateCollection" => validate_collection(client, state).await,
         _ => {
             client
@@ -28,11 +29,57 @@ pub async fn execute(
     }
 }
 
+/// Return metadata about a type, including which fields need user input.
+///
+/// A "prompt field" is one that is required, has no default value, and has
+/// no generated strategy anywhere in the extends chain.
+async fn type_info(
+    state: &BackendState,
+    args: &[serde_json::Value],
+) -> Result<Option<serde_json::Value>> {
+    let collection = match state.get_collection() {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+
+    let input = args.get(0).cloned().unwrap_or_else(|| serde_json::json!({}));
+    let type_name = match input.get("type").and_then(|v| v.as_str()) {
+        Some(t) => t.to_lowercase(),
+        None => return Ok(None),
+    };
+
+    let type_def = match collection.types.get(&type_name) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    let mut prompt_fields = Vec::new();
+    for (field_name, field_def) in &type_def.fields {
+        if field_def.required
+            && field_def.default.is_none()
+            && !has_generated_in_chain(&collection, &type_name, field_name)
+        {
+            let mut info = serde_json::json!({
+                "name": field_name,
+                "type": field_def.field_type,
+            });
+            if let Some(desc) = &field_def.description {
+                info["description"] = serde_json::json!(desc);
+            }
+            if let Some(ref values) = field_def.values {
+                info["values"] = serde_json::json!(values);
+            }
+            prompt_fields.push(info);
+        }
+    }
+
+    Ok(Some(serde_json::json!({ "prompt_fields": prompt_fields })))
+}
+
 /// Create a new file scaffolded from a type definition.
 ///
-/// Pre-generates values for fields with generated strategies, derives the
-/// file path from the inherited filename_pattern when no path is provided,
-/// and populates required fields that lack defaults with placeholders.
+/// Pre-generates values for fields with generated strategies and derives
+/// the file path from the inherited filename_pattern when none is provided.
 async fn create_file(
     client: &Client,
     state: &BackendState,
@@ -71,9 +118,7 @@ async fn create_file(
                 if fm_obj.contains_key(field_name) {
                     continue;
                 }
-                if let Some(value) =
-                    generate_field_value(&collection, &tn_lower, field_name)
-                {
+                if let Some(value) = generate_field_value(&collection, &tn_lower, field_name) {
                     fm_obj.insert(field_name.clone(), value);
                 }
             }
@@ -85,29 +130,12 @@ async fn create_file(
                 .map_or(false, |s| !s.is_empty());
             if !has_path {
                 if let Some(pattern) = find_filename_pattern(&collection, &tn_lower) {
-                    if let Some(path) =
-                        derive_path_from_pattern(&pattern, &fm_obj)
-                    {
+                    if let Some(path) = derive_path_from_pattern(&pattern, &fm_obj) {
                         input
                             .as_object_mut()
                             .unwrap()
                             .insert("path".to_string(), serde_json::json!(path));
                     }
-                }
-            }
-
-            // Fill remaining required fields that have no default and no
-            // generated strategy with type-appropriate placeholders.
-            for (field_name, field_def) in &type_def.fields {
-                if field_def.required
-                    && field_def.default.is_none()
-                    && field_def.generated.is_none()
-                    && !fm_obj.contains_key(field_name)
-                {
-                    fm_obj.insert(
-                        field_name.clone(),
-                        placeholder_for_type(&field_def.field_type),
-                    );
                 }
             }
 
@@ -133,6 +161,24 @@ async fn create_file(
         }
     }
     Ok(Some(result))
+}
+
+/// Check whether a field has a generated strategy anywhere in the extends chain.
+fn has_generated_in_chain(collection: &Collection, type_name: &str, field_name: &str) -> bool {
+    let mut current = Some(type_name.to_string());
+    while let Some(name) = current {
+        let type_def = match collection.types.get(&name) {
+            Some(t) => t,
+            None => break,
+        };
+        if let Some(field_def) = type_def.fields.get(field_name) {
+            if field_def.generated.is_some() {
+                return true;
+            }
+        }
+        current = type_def.extends.clone();
+    }
+    false
 }
 
 /// Walk the extends chain to find the first `filename_pattern`.
@@ -202,18 +248,6 @@ fn derive_path_from_pattern(
         i = start + value.len();
     }
     Some(result)
-}
-
-/// Return a sensible placeholder value for a required field based on its type.
-fn placeholder_for_type(field_type: &str) -> serde_json::Value {
-    match field_type {
-        "list" => serde_json::json!([]),
-        "object" => serde_json::json!({}),
-        "boolean" => serde_json::json!(false),
-        "integer" => serde_json::json!(0),
-        "number" => serde_json::json!(0),
-        _ => serde_json::json!(""),
-    }
 }
 
 /// Validate the entire collection and report results.
