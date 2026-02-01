@@ -13,5 +13,7 @@ serde_yaml = "0.9"
 dashmap = "6"
 ropey = "1"
 chrono = "0.4"
+ulid = "1"
+uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

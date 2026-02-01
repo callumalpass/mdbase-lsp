@@ -697,6 +697,8 @@ dependencies = [
  "tower-lsp",
  "tracing",
  "tracing-subscriber",
+ "ulid",
+ "uuid",
 ]
 
 [[package]]
