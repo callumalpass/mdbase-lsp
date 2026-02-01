@@ -51,8 +51,16 @@ fn definition_in_body(
     column: usize,
     rel_path: Option<&str>,
 ) -> Option<GotoDefinitionResponse> {
+    // Use body_links parser (respects fenced code blocks and inline code spans)
+    if let Some(link) = crate::body_links::body_link_at(text, line_idx, column) {
+        debug!(target = %link.target, "goto body: found body link at cursor");
+        let resolved = collection_utils::resolve_link_target(collection, &link.target, rel_path)?;
+        return make_location_response(&resolved);
+    }
+
+    // Fall back to line-level link detection
     let link = text::link_at_position(text, line_idx, column)?;
-    debug!(target = %link.target, "goto body: found link at cursor");
+    debug!(target = %link.target, "goto body: found link at cursor (line fallback)");
     let resolved = collection_utils::resolve_link_target(collection, &link.target, rel_path)?;
     make_location_response(&resolved)
 }

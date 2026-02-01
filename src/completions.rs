@@ -30,6 +30,15 @@ pub fn provide(
     let line_text = text.lines().nth(line_idx).unwrap_or("").to_string();
     let column = position.character as usize;
 
+    // Check for link completion context first — works in both body and frontmatter
+    if let Some(ctx) = text::link_completion_context(&line_text, column) {
+        let rel_path = uri.to_file_path().ok()
+            .and_then(|p| p.strip_prefix(&collection.root).ok().map(|r| r.to_string_lossy().to_string().replace('\\', "/")));
+        return Some(CompletionResponse::Array(
+            provide_link_completions(state, &ctx, line_idx, column, rel_path.as_deref()),
+        ));
+    }
+
     let in_frontmatter = text::is_in_frontmatter(&text, line_idx);
     if !in_frontmatter {
         debug!(uri = %uri, line = line_idx, "completion: not in frontmatter");
@@ -247,4 +256,92 @@ fn tag_completions(state: &BackendState) -> Vec<CompletionItem> {
             ..Default::default()
         })
         .collect()
+}
+
+fn provide_link_completions(
+    state: &BackendState,
+    ctx: &text::LinkCompletionContext,
+    line_idx: usize,
+    column: usize,
+    source_rel_path: Option<&str>,
+) -> Vec<CompletionItem> {
+    let targets = state.file_index.link_targets(None);
+    let edit_range = Range {
+        start: Position::new(line_idx as u32, ctx.start_col as u32),
+        end: Position::new(line_idx as u32, column as u32),
+    };
+
+    targets
+        .into_iter()
+        .map(|rel_path| {
+            match ctx.kind {
+                text::LinkCompletionKind::Wikilink => {
+                    let stem = rel_path.strip_suffix(".md").unwrap_or(&rel_path);
+                    CompletionItem {
+                        label: stem.to_string(),
+                        detail: Some(rel_path.clone()),
+                        kind: Some(CompletionItemKind::FILE),
+                        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                            range: edit_range,
+                            new_text: stem.to_string(),
+                        })),
+                        ..Default::default()
+                    }
+                }
+                text::LinkCompletionKind::Markdown => {
+                    let label = match source_rel_path {
+                        Some(src) => relative_path_from(src, &rel_path),
+                        None => rel_path.clone(),
+                    };
+                    CompletionItem {
+                        label: label.clone(),
+                        detail: Some(rel_path.clone()),
+                        kind: Some(CompletionItemKind::FILE),
+                        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                            range: edit_range,
+                            new_text: label,
+                        })),
+                        ..Default::default()
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+/// Compute a relative path from `source` to `target`, where both are
+/// collection-relative paths (e.g. `notes/foo.md`, `other/bar.md`).
+fn relative_path_from(source: &str, target: &str) -> String {
+    let src_dir = match source.rfind('/') {
+        Some(i) => &source[..i],
+        None => "",
+    };
+    let tgt_parts: Vec<&str> = target.split('/').collect();
+    let src_parts: Vec<&str> = if src_dir.is_empty() {
+        Vec::new()
+    } else {
+        src_dir.split('/').collect()
+    };
+
+    // Find the common prefix length
+    let common = src_parts
+        .iter()
+        .zip(tgt_parts.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let ups = src_parts.len() - common;
+    let mut parts: Vec<&str> = Vec::new();
+    for _ in 0..ups {
+        parts.push("..");
+    }
+    for segment in &tgt_parts[common..] {
+        parts.push(segment);
+    }
+
+    if parts.is_empty() {
+        tgt_parts.last().unwrap_or(&"").to_string()
+    } else {
+        parts.join("/")
+    }
 }

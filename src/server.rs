@@ -61,6 +61,7 @@ impl LanguageServer for MdbaseLanguageServer {
                     trigger_characters: Some(vec![
                         ":".into(),  // after field name
                         "[".into(),  // wikilink start
+                        "(".into(),  // markdown link ](
                         "#".into(),  // tag
                     ]),
                     resolve_provider: Some(false),
@@ -68,6 +69,10 @@ impl LanguageServer for MdbaseLanguageServer {
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                document_link_provider: Some(DocumentLinkOptions {
+                    resolve_provider: Some(false),
+                    work_done_progress_options: Default::default(),
+                }),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![],
                     ..Default::default()
@@ -254,6 +259,11 @@ impl LanguageServer for MdbaseLanguageServer {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         Ok(crate::goto::definition(&self.state, uri, pos))
+    }
+
+    async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
+        let uri = &params.text_document.uri;
+        Ok(crate::document_links::provide(&self.state, uri))
     }
 
     async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {

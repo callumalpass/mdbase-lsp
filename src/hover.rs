@@ -111,6 +111,48 @@ pub fn provide(
                 }
             }
         }
+    } else if let Some(link) = crate::body_links::body_link_at(&text, line_idx, column) {
+        // Body link hover — show target path, title, and types
+        let rel_path = uri.to_file_path().ok()
+            .and_then(|p| p.strip_prefix(&collection.root).ok().map(|r| r.to_string_lossy().to_string().replace('\\', "/")));
+        if let Some(resolved) = crate::collection_utils::resolve_link_target(
+            &collection,
+            &link.target,
+            rel_path.as_deref(),
+        ) {
+            if let Some(target_rel) = resolved
+                .strip_prefix(&collection.root)
+                .ok()
+                .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
+            {
+                let mut contents = format!("**Target** `{}`", target_rel);
+                // Try to read frontmatter from the target file for title/types
+                if let Ok(target_text) = std::fs::read_to_string(&resolved) {
+                    let parsed = text::parse_frontmatter(&target_text);
+                    if !parsed.parse_error && !parsed.mapping_error {
+                        if let Some(title) = parsed.json.get("title").and_then(|v| v.as_str()) {
+                            if !title.is_empty() {
+                                contents.push_str(&format!("\n\nTitle: {}", title));
+                            }
+                        }
+                        let types = collection.determine_types_for_path(&parsed.json, Some(&target_rel));
+                        if !types.is_empty() {
+                            contents.push_str(&format!("\n\nTypes: {}", types.join(", ")));
+                        }
+                    }
+                }
+                return Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: contents,
+                    }),
+                    range: Some(Range {
+                        start: Position::new(link.start_line as u32, link.start_col as u32),
+                        end: Position::new(link.end_line as u32, link.end_col as u32),
+                    }),
+                });
+            }
+        }
     } else if let Some(type_name) = text::word_at(&line_text, column) {
         if let Some(type_def) = collection.types.get(&type_name.to_lowercase()) {
             let mut contents = String::new();

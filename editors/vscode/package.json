@@ -27,6 +27,15 @@
         "title": "mdbase: Validate Collection"
       }
     ],
+    "configurationDefaults": {
+      "[markdown]": {
+        "editor.quickSuggestions": {
+          "other": true,
+          "comments": false,
+          "strings": false
+        }
+      }
+    },
     "configuration": {
       "title": "mdbase",
       "properties": {

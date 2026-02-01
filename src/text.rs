@@ -285,6 +285,73 @@ pub(crate) fn value_from_frontmatter_line(line: &str, column: usize) -> Option<S
     None
 }
 
+// ---------------------------------------------------------------------------
+// Link completion context detection
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LinkCompletionKind {
+    Wikilink,
+    Markdown,
+}
+
+pub(crate) struct LinkCompletionContext {
+    pub kind: LinkCompletionKind,
+    pub prefix: String,
+    pub start_col: usize,
+}
+
+/// Detect whether the cursor is inside an incomplete link and return context
+/// for providing file completions.
+///
+/// Scans backwards from `column` on `line` for `[[` (wikilink/embed) or `](`
+/// (markdown link). Returns `None` if the link is already closed, the prefix
+/// contains `#` or `|` (anchor/alias), or the target is an external URL.
+pub(crate) fn link_completion_context(line: &str, column: usize) -> Option<LinkCompletionContext> {
+    let before: String = line.chars().take(column).collect();
+
+    // Look for wikilink opener `[[` (or `![[`)
+    if let Some(pos) = before.rfind("[[") {
+        let after_open = &before[pos + 2..];
+        // Already closed?
+        if after_open.contains("]]") {
+            // fall through to check markdown link
+        } else if after_open.contains('#') || after_open.contains('|') {
+            return None;
+        } else {
+            return Some(LinkCompletionContext {
+                kind: LinkCompletionKind::Wikilink,
+                prefix: after_open.to_string(),
+                start_col: pos + 2,
+            });
+        }
+    }
+
+    // Look for markdown link opener `](`
+    if let Some(pos) = before.rfind("](") {
+        let after_open = &before[pos + 2..];
+        // Already closed?
+        if after_open.contains(')') {
+            return None;
+        }
+        if after_open.contains('#') {
+            return None;
+        }
+        // Skip external URLs
+        let trimmed = after_open.trim_start();
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            return None;
+        }
+        return Some(LinkCompletionContext {
+            kind: LinkCompletionKind::Markdown,
+            prefix: after_open.to_string(),
+            start_col: pos + 2,
+        });
+    }
+
+    None
+}
+
 /// Find the field name that owns the value on `line_idx`.
 ///
 /// For `field: value` lines, returns the field name directly.
