@@ -28,11 +28,8 @@ pub async fn execute(
 
 /// Create a new file scaffolded from a type definition.
 ///
-/// TODO: Implement:
-/// 1. Read type name from arguments
-/// 2. Load type schema from mdbase-rs
-/// 3. Generate frontmatter with required fields, defaults, generated values
-/// 4. Create the file and open it in the editor
+/// Pre-populates required fields that lack defaults/generated strategies
+/// with type-appropriate placeholders so they appear in the created file.
 async fn create_file(
     client: &Client,
     state: &BackendState,
@@ -46,7 +43,35 @@ async fn create_file(
         }
     };
 
-    let input = args.get(0).cloned().unwrap_or_else(|| serde_json::json!({}));
+    let mut input = args.get(0).cloned().unwrap_or_else(|| serde_json::json!({}));
+
+    // Pre-populate required fields that have no default and no generated strategy
+    if let Some(type_name) = input.get("type").and_then(|v| v.as_str()) {
+        if let Some(type_def) = collection.types.get(&type_name.to_lowercase()) {
+            let fm = input
+                .get("frontmatter")
+                .or_else(|| input.get("fields"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let mut fm_obj = fm.as_object().cloned().unwrap_or_default();
+
+            for (field_name, field_def) in &type_def.fields {
+                if field_def.required
+                    && field_def.default.is_none()
+                    && field_def.generated.is_none()
+                    && !fm_obj.contains_key(field_name)
+                {
+                    fm_obj.insert(field_name.clone(), placeholder_for_type(&field_def.field_type));
+                }
+            }
+
+            input.as_object_mut().unwrap().insert(
+                "frontmatter".to_string(),
+                serde_json::Value::Object(fm_obj),
+            );
+        }
+    }
+
     let result = collection.create(&input);
     if let Some(path) = result.get("path").and_then(|v| v.as_str()) {
         let full_path = collection.root.join(path);
@@ -60,6 +85,18 @@ async fn create_file(
         }
     }
     Ok(Some(result))
+}
+
+/// Return a sensible placeholder value for a required field based on its type.
+fn placeholder_for_type(field_type: &str) -> serde_json::Value {
+    match field_type {
+        "list" => serde_json::json!([]),
+        "object" => serde_json::json!({}),
+        "boolean" => serde_json::json!(false),
+        "integer" => serde_json::json!(0),
+        "number" => serde_json::json!(0),
+        _ => serde_json::json!(""),
+    }
 }
 
 /// Validate the entire collection and report results.
