@@ -123,6 +123,16 @@ async fn create_file(
                 }
             }
 
+            // Pre-apply defaults so they appear in the written file
+            // (collection.create() only uses defaults for validation).
+            for (field_name, field_def) in &type_def.fields {
+                if !fm_obj.contains_key(field_name) {
+                    if let Some(default) = &field_def.default {
+                        fm_obj.insert(field_name.clone(), default.clone());
+                    }
+                }
+            }
+
             // Derive path from filename_pattern if none provided.
             let has_path = input
                 .get("path")
@@ -149,6 +159,14 @@ async fn create_file(
     let result = collection.create(&input);
     if let Some(path) = result.get("path").and_then(|v| v.as_str()) {
         let full_path = collection.root.join(path);
+
+        // collection.create() always inserts a `type` key.  When the
+        // collection uses match rules instead of explicit type keys,
+        // strip the unwanted field from the written file.
+        if collection.settings.explicit_type_keys.is_empty() {
+            strip_frontmatter_field(&full_path, "type");
+        }
+
         if let Ok(uri) = Url::from_file_path(full_path) {
             let _ = client
                 .show_document(ShowDocumentParams {
@@ -248,6 +266,34 @@ fn derive_path_from_pattern(
         i = start + value.len();
     }
     Some(result)
+}
+
+/// Remove a top-level YAML key from a file's frontmatter.
+fn strip_frontmatter_field(path: &std::path::Path, key: &str) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.first().map_or(true, |l| l.trim() != "---") {
+        return;
+    }
+    let fm_end = match lines[1..].iter().position(|l| l.trim() == "---") {
+        Some(i) => i + 1,
+        None => return,
+    };
+    let prefix = format!("{}:", key);
+    let filtered: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .filter(|&(i, line)| !(i > 0 && i <= fm_end && line.trim_start().starts_with(&prefix)))
+        .map(|(_, line)| *line)
+        .collect();
+    let mut new_content = filtered.join("\n");
+    if content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    let _ = std::fs::write(path, new_content);
 }
 
 /// Validate the entire collection and report results.
