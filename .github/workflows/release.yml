@@ -40,12 +40,6 @@ jobs:
       - name: Checkout mdbase-lsp
         uses: actions/checkout@v4
 
-      - name: Checkout mdbase-rs
-        uses: actions/checkout@v4
-        with:
-          repository: callumalpass/mdbase-rs
-          path: ../mdbase-rs
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
