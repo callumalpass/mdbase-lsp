@@ -21,7 +21,7 @@ jobs:
           path: ../mdbase-rs
 
       - name: Install Rust
-        uses: dtolnay/rust-action/setup@v1
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cargo check
         run: cargo check
