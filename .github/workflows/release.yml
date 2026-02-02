@@ -20,7 +20,7 @@ jobs:
             archive: mdbase-lsp-linux-x64.tar.gz
           - vscode-target: darwin-x64
             rust-target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-latest
             binary: mdbase-lsp
             archive: mdbase-lsp-darwin-x64.tar.gz
           - vscode-target: darwin-arm64
