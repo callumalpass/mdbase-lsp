@@ -10,6 +10,8 @@ pub(crate) struct FileEntry {
     pub rel_path: String,
     pub types: Vec<String>,
     pub tags: Vec<String>,
+    pub display_name: Option<String>,
+    pub preview: Option<String>,
 }
 
 pub(crate) struct FileIndex {
@@ -45,6 +47,8 @@ impl FileIndex {
             }
 
             let types = collection.determine_types_for_path(&parsed.json, Some(&rel_path));
+            let display_name = resolve_display_name(collection, &types, &parsed.json);
+            let preview = build_preview(&content);
 
             let mut tags = Vec::new();
             if let Some(arr) = parsed.json.get("tags").and_then(|v| v.as_array()) {
@@ -72,6 +76,8 @@ impl FileIndex {
                 rel_path,
                 types,
                 tags,
+                display_name,
+                preview,
             });
         }
 
@@ -92,6 +98,22 @@ impl FileIndex {
             .collect()
     }
 
+    /// Return rel_paths with optional display names that match `target_type`.
+    pub fn link_targets_with_display(
+        &self,
+        target_type: Option<&str>,
+    ) -> Vec<(String, Option<String>, Option<String>)> {
+        let entries = self.entries.read().unwrap();
+        entries
+            .iter()
+            .filter(|e| match target_type {
+                Some(tt) => e.types.iter().any(|t| t.eq_ignore_ascii_case(tt)),
+                None => true,
+            })
+            .map(|e| (e.rel_path.clone(), e.display_name.clone(), e.preview.clone()))
+            .collect()
+    }
+
     /// Return all unique tags across the collection, sorted.
     pub fn all_tags(&self) -> Vec<String> {
         let entries = self.entries.read().unwrap();
@@ -106,4 +128,68 @@ impl FileIndex {
         tags.sort();
         tags
     }
+}
+
+fn resolve_display_name(
+    collection: &Collection,
+    type_names: &[String],
+    frontmatter: &serde_json::Value,
+) -> Option<String> {
+    let mut candidates = Vec::new();
+    if type_names.is_empty() {
+        for type_def in collection.types.values() {
+            if let Some(name) = &type_def.display_name {
+                candidates.push(name.clone());
+            }
+        }
+    } else {
+        for type_name in type_names {
+            if let Some(type_def) = collection.types.get(type_name) {
+                if let Some(name) = &type_def.display_name {
+                    candidates.push(name.clone());
+                }
+            }
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for field in candidates {
+        if !seen.insert(field.clone()) {
+            continue;
+        }
+        if let Some(value) = frontmatter.get(&field).and_then(|v| v.as_str()) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+
+    if let Some(value) = frontmatter.get("display-name").and_then(|v| v.as_str()) {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+
+    if let Some(value) = frontmatter.get("title").and_then(|v| v.as_str()) {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+
+    None
+}
+
+fn build_preview(content: &str) -> Option<String> {
+    let max_chars = 2000usize;
+    if content.is_empty() {
+        return None;
+    }
+    let mut preview: String = content.chars().take(max_chars).collect();
+    if content.chars().count() > max_chars {
+        preview.push_str("...");
+    }
+    Some(preview)
 }

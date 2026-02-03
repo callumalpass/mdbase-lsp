@@ -265,7 +265,7 @@ fn provide_link_completions(
     column: usize,
     source_rel_path: Option<&str>,
 ) -> Vec<CompletionItem> {
-    let targets = state.file_index.link_targets(None);
+    let targets = state.file_index.link_targets_with_display(None);
     let edit_range = Range {
         start: Position::new(line_idx as u32, ctx.start_col as u32),
         end: Position::new(line_idx as u32, column as u32),
@@ -273,17 +273,35 @@ fn provide_link_completions(
 
     targets
         .into_iter()
-        .map(|rel_path| {
+        .map(|(rel_path, display_name, preview)| {
             match ctx.kind {
                 text::LinkCompletionKind::Wikilink => {
                     let stem = rel_path.strip_suffix(".md").unwrap_or(&rel_path);
+                    let label = display_name.clone().unwrap_or_else(|| stem.to_string());
+                    let insert_text = match display_name.as_deref() {
+                        Some(name) if !name.is_empty() && name != stem => {
+                            format!("{}|{}", stem, name)
+                        }
+                        _ => stem.to_string(),
+                    };
+                    let filter_text = display_name.as_ref().map(|d| {
+                        format!("{} {} {}", d, stem, rel_path)
+                    });
+                    let documentation = preview.map(|p| {
+                        Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::PlainText,
+                            value: p,
+                        })
+                    });
                     CompletionItem {
-                        label: stem.to_string(),
+                        label,
                         detail: Some(rel_path.clone()),
                         kind: Some(CompletionItemKind::FILE),
+                        filter_text,
+                        documentation,
                         text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                             range: edit_range,
-                            new_text: stem.to_string(),
+                            new_text: insert_text,
                         })),
                         ..Default::default()
                     }
