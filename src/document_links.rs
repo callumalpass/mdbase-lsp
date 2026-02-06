@@ -1,5 +1,4 @@
 /// DocumentLink provider — returns clickable link ranges with resolved target URIs.
-
 use tower_lsp::lsp_types::*;
 
 use crate::body_links;

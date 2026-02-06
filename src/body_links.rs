@@ -71,7 +71,9 @@ pub(crate) fn body_link_at(text: &str, line: usize, col: usize) -> Option<BodyLi
         if line_idx == line {
             let mut links = Vec::new();
             parse_line_links(line_text, line_idx, &mut links);
-            return links.into_iter().find(|l| col >= l.start_col && col < l.end_col);
+            return links
+                .into_iter()
+                .find(|l| col >= l.start_col && col < l.end_col);
         }
     }
 
@@ -155,7 +157,7 @@ fn parse_line_links(line: &str, line_idx: usize, out: &mut Vec<BodyLink>) {
             let is_image = i > 0 && chars[i - 1] == '!';
             let link_start_utf16 = utf16_col(&chars, if is_image { i - 1 } else { i });
             i += 1; // skip [
-            // Find matching ]
+                    // Find matching ]
             let mut bracket_depth = 1;
             while i < len && bracket_depth > 0 {
                 if chars[i] == '[' {
@@ -197,10 +199,7 @@ fn parse_line_links(line: &str, line_idx: usize, out: &mut Vec<BodyLink>) {
                 }
 
                 let path = path.trim();
-                if path.is_empty()
-                    || path.starts_with("http://")
-                    || path.starts_with("https://")
-                {
+                if path.is_empty() || path.starts_with("http://") || path.starts_with("https://") {
                     continue;
                 }
 
@@ -247,7 +246,11 @@ fn parse_line_links(line: &str, line_idx: usize, out: &mut Vec<BodyLink>) {
                         .iter()
                         .collect();
                     let s = s.trim().to_string();
-                    if s.is_empty() { None } else { Some(s) }
+                    if s.is_empty() {
+                        None
+                    } else {
+                        Some(s)
+                    }
                 } else {
                     None
                 };
@@ -279,7 +282,14 @@ fn split_anchor(s: &str) -> (String, Option<String>) {
     if let Some(hash_pos) = s.find('#') {
         let target = s[..hash_pos].trim().to_string();
         let anchor = s[hash_pos + 1..].trim().to_string();
-        (target, if anchor.is_empty() { None } else { Some(anchor) })
+        (
+            target,
+            if anchor.is_empty() {
+                None
+            } else {
+                Some(anchor)
+            },
+        )
     } else {
         (s.trim().to_string(), None)
     }

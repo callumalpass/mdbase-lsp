@@ -3,8 +3,10 @@ import * as fs from "fs";
 import {
   commands,
   ExtensionContext,
+  OutputChannel,
   workspace,
   window,
+  WorkspaceFolder,
 } from "vscode";
 import {
   ExecuteCommandRequest,
@@ -14,12 +16,19 @@ import {
 } from "vscode-languageclient/node";
 
 let client: LanguageClient | undefined;
+let validationOutput: OutputChannel | undefined;
 
 function resolveServerPath(extensionPath: string): string | undefined {
   const config = workspace.getConfiguration("mdbase");
   const userPath: string = config.get("serverPath", "");
   if (userPath) {
-    return userPath;
+    if (fs.existsSync(userPath) && fs.statSync(userPath).isFile()) {
+      return userPath;
+    }
+    window.showErrorMessage(
+      `mdbase.serverPath is set but invalid: ${userPath}`
+    );
+    return undefined;
   }
 
   const ext = process.platform === "win32" ? ".exe" : "";
@@ -34,6 +43,29 @@ function resolveServerPath(extensionPath: string): string | undefined {
     path.join(root, "target", "debug", `mdbase-lsp${ext}`),
   ];
   return candidates.find((p) => fs.existsSync(p));
+}
+
+async function pickWorkspaceFolder(): Promise<WorkspaceFolder | undefined> {
+  const folders = workspace.workspaceFolders;
+  if (!folders || folders.length === 0) {
+    return undefined;
+  }
+  if (folders.length === 1) {
+    return folders[0];
+  }
+
+  const activeUri = window.activeTextEditor?.document.uri;
+  if (activeUri) {
+    const owningFolder = workspace.getWorkspaceFolder(activeUri);
+    if (owningFolder) {
+      return owningFolder;
+    }
+  }
+
+  const picked = await window.showWorkspaceFolderPick({
+    placeHolder: "Select a workspace folder for mdbase type discovery",
+  });
+  return picked;
 }
 
 export async function activate(context: ExtensionContext): Promise<void> {
@@ -69,21 +101,26 @@ export async function activate(context: ExtensionContext): Promise<void> {
 
   context.subscriptions.push(client);
 
-  await client.start();
+  try {
+    await client.start();
+  } catch (e) {
+    client = undefined;
+    window.showErrorMessage(
+      `Failed to start mdbase-lsp: ${e instanceof Error ? e.message : String(e)}`
+    );
+    return;
+  }
 
   context.subscriptions.push(
     commands.registerCommand("mdbase.createFile", async () => {
-      window.showInformationMessage("mdbase: createFile command invoked");
       if (!client) {
         window.showErrorMessage("mdbase: no client");
         return;
       }
 
       // Discover available types from _types/ folder
-      const folders = workspace.workspaceFolders;
-      const typesDir = folders?.[0]
-        ? path.join(folders[0].uri.fsPath, "_types")
-        : undefined;
+      const folder = await pickWorkspaceFolder();
+      const typesDir = folder ? path.join(folder.uri.fsPath, "_types") : undefined;
       let typeNames: string[] = [];
       if (typesDir && fs.existsSync(typesDir)) {
         typeNames = fs
@@ -189,13 +226,43 @@ export async function activate(context: ExtensionContext): Promise<void> {
       });
 
       if (result) {
-        const output = window.createOutputChannel("mdbase validation");
-        output.clear();
-        output.appendLine(JSON.stringify(result, null, 2));
-        output.show();
+        if (!validationOutput) {
+          validationOutput = window.createOutputChannel("mdbase validation");
+          context.subscriptions.push(validationOutput);
+        }
+        validationOutput.clear();
+        validationOutput.appendLine(JSON.stringify(result, null, 2));
+        validationOutput.show();
       } else {
         window.showInformationMessage("mdbase: collection is valid");
       }
+    })
+  );
+
+  context.subscriptions.push(
+    commands.registerCommand("mdbase.queryCollection", async () => {
+      if (!client) {
+        return;
+      }
+      const query = await window.showInputBox({
+        prompt: "Collection query",
+        placeHolder: "examples: type:zettel, tag:project, title:roadmap",
+      });
+      if (query === undefined) {
+        return;
+      }
+
+      const result = await client.sendRequest(ExecuteCommandRequest.type, {
+        command: "mdbase.queryCollection",
+        arguments: [{ query }],
+      });
+      if (!validationOutput) {
+        validationOutput = window.createOutputChannel("mdbase validation");
+        context.subscriptions.push(validationOutput);
+      }
+      validationOutput.clear();
+      validationOutput.appendLine(JSON.stringify(result, null, 2));
+      validationOutput.show();
     })
   );
 }

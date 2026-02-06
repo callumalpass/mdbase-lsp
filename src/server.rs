@@ -1,10 +1,10 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use tracing::{info, warn};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
+use tracing::{info, warn};
 
 use crate::state::{BackendState, DocumentState};
 
@@ -59,22 +59,31 @@ impl LanguageServer for MdbaseLanguageServer {
                 )),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![
-                        ":".into(),  // after field name
-                        "[".into(),  // wikilink start
-                        "(".into(),  // markdown link ](
-                        "#".into(),  // tag
+                        ":".into(), // after field name
+                        "[".into(), // wikilink start
+                        "(".into(), // markdown link ](
+                        "#".into(), // tag
                     ]),
                     resolve_provider: Some(false),
                     ..Default::default()
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 document_link_provider: Some(DocumentLinkOptions {
                     resolve_provider: Some(false),
                     work_done_progress_options: Default::default(),
                 }),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec![],
+                    commands: vec![
+                        "mdbase.createFile".to_string(),
+                        "mdbase.typeInfo".to_string(),
+                        "mdbase.validateCollection".to_string(),
+                        "mdbase.queryCollection".to_string(),
+                    ],
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -104,7 +113,17 @@ impl LanguageServer for MdbaseLanguageServer {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
-        self.state.documents.insert(uri.clone(), DocumentState::new(ropey::Rope::from_str(&text)));
+        self.state.documents.insert(
+            uri.clone(),
+            DocumentState::new(ropey::Rope::from_str(&text)),
+        );
+        if let Some(collection) = self.state.get_collection() {
+            if let Some(rel_path) = crate::collection_utils::rel_path_from_uri(&collection, &uri) {
+                self.state
+                    .file_index
+                    .upsert_from_text(&collection, rel_path, &text);
+            }
+        }
         // Immediate diagnostics on open
         crate::diagnostics::publish(&self.client, &self.state, &uri).await;
     }
@@ -142,6 +161,11 @@ impl LanguageServer for MdbaseLanguageServer {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = &params.text_document.uri;
+        if let Some(collection) = self.state.get_collection() {
+            if let Some(rel_path) = crate::collection_utils::rel_path_from_uri(&collection, uri) {
+                self.state.file_index.remove_path(&rel_path);
+            }
+        }
         self.state.documents.remove(uri);
         self.state.diagnostics_generation.remove(uri);
     }
@@ -172,8 +196,7 @@ impl LanguageServer for MdbaseLanguageServer {
                 .ok()
                 .map(|r: &std::path::Path| r.to_string_lossy().to_string().replace('\\', "/"))
         });
-        let type_names =
-            collection.determine_types_for_path(&parsed.json, rel_path.as_deref());
+        let type_names = collection.determine_types_for_path(&parsed.json, rel_path.as_deref());
 
         // Collect unique NowOnWrite field names across all matched types
         let mut now_fields = Vec::new();
@@ -195,9 +218,7 @@ impl LanguageServer for MdbaseLanguageServer {
             return Ok(None);
         }
 
-        let now = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let bounds = crate::text::frontmatter_bounds(&text);
 
         let mut edits = Vec::new();
@@ -219,9 +240,10 @@ impl LanguageServer for MdbaseLanguageServer {
         // Re-sync the in-memory rope from the file on disk
         if let Ok(file_path) = uri.to_file_path() {
             if let Ok(new_text) = std::fs::read_to_string(&file_path) {
-                self.state
-                    .documents
-                    .insert(uri.clone(), DocumentState::new(ropey::Rope::from_str(&new_text)));
+                self.state.documents.insert(
+                    uri.clone(),
+                    DocumentState::new(ropey::Rope::from_str(&new_text)),
+                );
             }
         }
 
@@ -237,13 +259,16 @@ impl LanguageServer for MdbaseLanguageServer {
         // Immediate diagnostics on save
         crate::diagnostics::publish(&self.client, &self.state, &uri).await;
 
-        // Rebuild file index in the background
-        let state = Arc::clone(&self.state);
-        tokio::task::spawn_blocking(move || {
-            if let Some(collection) = state.get_collection() {
-                state.file_index.rebuild(&collection);
+        // Incrementally update file index for this saved file.
+        if let Some(collection) = self.state.get_collection() {
+            if let Some(rel_path) = crate::collection_utils::rel_path_from_uri(&collection, &uri) {
+                if let Some(text) = self.state.document_text(&uri) {
+                    self.state
+                        .file_index
+                        .upsert_from_text(&collection, rel_path, &text);
+                }
             }
-        });
+        }
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -267,12 +292,44 @@ impl LanguageServer for MdbaseLanguageServer {
         Ok(crate::goto::definition(&self.state, uri, pos))
     }
 
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        Ok(crate::references::provide(&self.state, params))
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        Ok(crate::code_actions::provide(&self.state, params))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        Ok(crate::references::prepare_rename(&self.state, params))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        Ok(crate::references::rename(&self.state, params))
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        Ok(crate::symbols::workspace_symbols(
+            &self.state,
+            &params.query,
+        ))
+    }
+
     async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
         let uri = &params.text_document.uri;
         Ok(crate::document_links::provide(&self.state, uri))
     }
 
-    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
         crate::commands::execute(&self.client, &self.state, &params).await
     }
 }

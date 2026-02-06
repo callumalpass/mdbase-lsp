@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use mdbase::Collection;
+use tower_lsp::lsp_types::Url;
 use tracing::debug;
 
 pub(crate) fn scan_collection_files(collection: &Collection) -> Vec<PathBuf> {
@@ -9,7 +10,10 @@ pub(crate) fn scan_collection_files(collection: &Collection) -> Vec<PathBuf> {
     files
 }
 
-pub(crate) fn find_type_definition_path(collection: &Collection, type_name: &str) -> Option<PathBuf> {
+pub(crate) fn find_type_definition_path(
+    collection: &Collection,
+    type_name: &str,
+) -> Option<PathBuf> {
     let types_dir = collection.root.join(&collection.settings.types_folder);
     if !types_dir.exists() {
         return None;
@@ -207,7 +211,14 @@ pub(crate) fn resolve_link_target(
     // Strip wikilink syntax if accidentally passed through
     let target = if target.starts_with("[[") && target.ends_with("]]") {
         let inner = &target[2..target.len() - 2];
-        inner.split('|').next().unwrap_or(inner).split('#').next().unwrap_or(inner).trim()
+        inner
+            .split('|')
+            .next()
+            .unwrap_or(inner)
+            .split('#')
+            .next()
+            .unwrap_or(inner)
+            .trim()
     } else {
         target.split('#').next().unwrap_or(target).trim()
     };
@@ -250,7 +261,9 @@ pub(crate) fn resolve_link_target(
     }
 
     // 2. Extension inference — try .md, then configured extensions
-    if !resolved.contains('.') || (!resolved.ends_with(".md") && !has_known_extension(collection, &resolved)) {
+    if !resolved.contains('.')
+        || (!resolved.ends_with(".md") && !has_known_extension(collection, &resolved))
+    {
         let with_md = format!("{}.md", resolved);
         if known.contains(&with_md) {
             debug!("resolve_link_target: matched with .md extension");
@@ -322,9 +335,7 @@ pub(crate) fn parse_link_value(value: &str) -> Option<String> {
             if value.ends_with(')') {
                 let path = &value[bracket_end + 2..value.len() - 1];
                 let path = path.trim();
-                if !path.is_empty()
-                    && !path.starts_with("http://")
-                    && !path.starts_with("https://")
+                if !path.is_empty() && !path.starts_with("http://") && !path.starts_with("https://")
                 {
                     let target = path.split('#').next().unwrap_or(path).to_string();
                     if !target.is_empty() {
@@ -342,4 +353,15 @@ pub(crate) fn parse_link_value(value: &str) -> Option<String> {
     }
 
     Some(value.to_string())
+}
+
+pub(crate) fn rel_path_from_uri(collection: &Collection, uri: &Url) -> Option<String> {
+    let path = uri.to_file_path().ok()?;
+    path.strip_prefix(&collection.root)
+        .ok()
+        .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
+}
+
+pub(crate) fn uri_from_rel_path(collection: &Collection, rel_path: &str) -> Option<Url> {
+    Url::from_file_path(collection.root.join(rel_path)).ok()
 }

@@ -2,17 +2,20 @@ use tower_lsp::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 
 mod body_links;
+mod code_actions;
+mod collection_utils;
 mod commands;
 mod completions;
-mod collection_utils;
 mod diagnostics;
 mod document_links;
 mod file_index;
 mod goto;
 mod hover;
 mod link_resolve;
+mod references;
 mod server;
 mod state;
+mod symbols;
 mod text;
 
 #[tokio::main]

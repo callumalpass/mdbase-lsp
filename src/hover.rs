@@ -9,11 +9,7 @@ use crate::text;
 /// - Field name hover: show type, constraints, description from type schema
 /// - Link hover: show target file's frontmatter preview
 /// - Type name hover: show type definition summary
-pub fn provide(
-    state: &BackendState,
-    uri: &Url,
-    position: Position,
-) -> Option<Hover> {
+pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Hover> {
     let collection = state.get_collection()?;
     let text = state.document_text(uri)?;
     let line_idx = position.line as usize;
@@ -21,22 +17,39 @@ pub fn provide(
     let column = position.character as usize;
 
     if text::is_in_frontmatter(&text, line_idx) {
-        let parsed = state.documents.get(uri)
+        let parsed = state
+            .documents
+            .get(uri)
             .map(|doc| doc.frontmatter())
             .unwrap_or_else(|| text::parse_frontmatter(&text));
         if parsed.parse_error || parsed.mapping_error {
             return None;
         }
-        let rel_path = uri.to_file_path().ok()
-            .and_then(|p| p.strip_prefix(&collection.root).ok().map(|r| r.to_string_lossy().to_string().replace('\\', "/")));
+        let rel_path = uri.to_file_path().ok().and_then(|p| {
+            p.strip_prefix(&collection.root)
+                .ok()
+                .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
+        });
         let type_names = collection.determine_types_for_path(&parsed.json, rel_path.as_deref());
 
         if let Some(field_name) = text::field_name_from_line(&line_text) {
             let colon_idx = line_text.find(':').unwrap_or(0);
             if column <= colon_idx {
-                if let Some(field_def) = field_def_for_types(&collection, &type_names, &field_name) {
+                if let Some(field_def) = field_def_for_types(&collection, &type_names, &field_name)
+                {
                     let mut contents = String::new();
                     contents.push_str(&format!("**{}**: `{}`", field_name, field_def.field_type));
+                    if field_def.required {
+                        contents.push_str("\n\nRequired");
+                    }
+                    if let Some(values) = &field_def.values {
+                        if !values.is_empty() {
+                            contents.push_str(&format!("\n\nAllowed: {}", values.join(", ")));
+                        }
+                    }
+                    if let Some(default) = &field_def.default {
+                        contents.push_str(&format!("\n\nDefault: {}", default));
+                    }
                     if let Some(desc) = field_def.description.as_deref() {
                         contents.push_str(&format!("\n\n{}", desc));
                     }
@@ -71,23 +84,31 @@ pub fn provide(
                     }
                 }
 
-                if let Some(field_def) = field_def_for_types(&collection, &type_names, &field_name) {
+                if let Some(field_def) = field_def_for_types(&collection, &type_names, &field_name)
+                {
                     if is_link_field(&field_def) {
                         if let Some(rel_path) = rel_path {
                             let resolved = collection.resolve_link(&serde_json::json!({
                                 "path": rel_path,
                                 "field": field_name,
                             }));
-                            if let Some(target) = resolved.get("resolved_path").and_then(|v| v.as_str()) {
+                            if let Some(target) =
+                                resolved.get("resolved_path").and_then(|v| v.as_str())
+                            {
                                 let read = collection.read(&serde_json::json!({"path": target}));
-                                let title = read.get("frontmatter")
+                                let title = read
+                                    .get("frontmatter")
                                     .and_then(|fm| fm.get("title"))
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
-                                let types = read.get("types")
+                                let types = read
+                                    .get("types")
                                     .and_then(|v| v.as_array())
                                     .map(|arr| {
-                                        arr.iter().filter_map(|t| t.as_str()).collect::<Vec<_>>().join(", ")
+                                        arr.iter()
+                                            .filter_map(|t| t.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
                                     })
                                     .unwrap_or_default();
                                 let mut contents = String::new();
@@ -113,8 +134,11 @@ pub fn provide(
         }
     } else if let Some(link) = crate::body_links::body_link_at(&text, line_idx, column) {
         // Body link hover — show target path, title, and types
-        let rel_path = uri.to_file_path().ok()
-            .and_then(|p| p.strip_prefix(&collection.root).ok().map(|r| r.to_string_lossy().to_string().replace('\\', "/")));
+        let rel_path = uri.to_file_path().ok().and_then(|p| {
+            p.strip_prefix(&collection.root)
+                .ok()
+                .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
+        });
         if let Some(resolved) = crate::collection_utils::resolve_link_target(
             &collection,
             &link.target,
@@ -135,7 +159,8 @@ pub fn provide(
                                 contents.push_str(&format!("\n\nTitle: {}", title));
                             }
                         }
-                        let types = collection.determine_types_for_path(&parsed.json, Some(&target_rel));
+                        let types =
+                            collection.determine_types_for_path(&parsed.json, Some(&target_rel));
                         if !types.is_empty() {
                             contents.push_str(&format!("\n\nTypes: {}", types.join(", ")));
                         }

@@ -25,18 +25,23 @@ pub fn definition(
     let line_idx = position.line as usize;
     let column = position.character as usize;
 
-    let rel_path = uri
-        .to_file_path()
-        .ok()
-        .and_then(|p| {
-            p.strip_prefix(&collection.root)
-                .ok()
-                .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
-        });
+    let rel_path = uri.to_file_path().ok().and_then(|p| {
+        p.strip_prefix(&collection.root)
+            .ok()
+            .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
+    });
 
     if text::is_in_frontmatter(&text, line_idx) {
         debug!(line = line_idx, col = column, "goto: cursor in frontmatter");
-        definition_in_frontmatter(state, uri, &collection, &text, line_idx, column, rel_path.as_deref())
+        definition_in_frontmatter(
+            state,
+            uri,
+            &collection,
+            &text,
+            line_idx,
+            column,
+            rel_path.as_deref(),
+        )
     } else {
         debug!(line = line_idx, col = column, "goto: cursor in body");
         definition_in_body(&collection, &text, line_idx, column, rel_path.as_deref())
@@ -78,7 +83,9 @@ fn definition_in_frontmatter(
     // 1. Check if the cursor is on an inline link (wikilink/markdown link in a FM value)
     if let Some(link) = text::link_at_position(text, line_idx, column) {
         debug!(target = %link.target, "goto fm: inline link at cursor");
-        if let Some(resolved) = collection_utils::resolve_link_target(collection, &link.target, rel_path) {
+        if let Some(resolved) =
+            collection_utils::resolve_link_target(collection, &link.target, rel_path)
+        {
             return make_location_response(&resolved);
         }
     }
@@ -103,7 +110,8 @@ fn definition_in_frontmatter(
     if field_name == "type" || field_name == "types" {
         if let Some(word) = text::word_at(text.lines().nth(line_idx).unwrap_or(""), column) {
             debug!(type_name = %word, "goto fm: looking up type definition");
-            if let Some(type_path) = collection_utils::find_type_definition_path(collection, &word) {
+            if let Some(type_path) = collection_utils::find_type_definition_path(collection, &word)
+            {
                 return make_location_response(&type_path);
             }
         }
@@ -117,7 +125,9 @@ fn definition_in_frontmatter(
             debug!(value = %value, "goto fm: link field value");
             let target = collection_utils::parse_link_value(&value).unwrap_or(value);
             debug!(target = %target, "goto fm: parsed link target");
-            if let Some(resolved) = collection_utils::resolve_link_target(collection, &target, rel_path) {
+            if let Some(resolved) =
+                collection_utils::resolve_link_target(collection, &target, rel_path)
+            {
                 return make_location_response(&resolved);
             }
         }
@@ -138,11 +148,7 @@ fn make_location_response(path: &PathBuf) -> Option<GotoDefinitionResponse> {
 
 /// Check whether `field_name` is a link-type field for any of the given types
 /// (or any type at all, when `type_names` is empty).
-fn is_link_field(
-    collection: &mdbase::Collection,
-    type_names: &[String],
-    field_name: &str,
-) -> bool {
+fn is_link_field(collection: &mdbase::Collection, type_names: &[String], field_name: &str) -> bool {
     let types_to_check: Vec<&mdbase::types::schema::TypeDef> = if type_names.is_empty() {
         collection.types.values().collect()
     } else {

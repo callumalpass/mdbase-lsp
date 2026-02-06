@@ -88,7 +88,10 @@ pub(crate) fn find_field_range(
     text: &str,
     field: &str,
     fallback_line: usize,
-) -> (tower_lsp::lsp_types::Position, tower_lsp::lsp_types::Position) {
+) -> (
+    tower_lsp::lsp_types::Position,
+    tower_lsp::lsp_types::Position,
+) {
     if let Some((start, end)) = frontmatter_bounds(text) {
         for (line_idx, line) in text.lines().enumerate() {
             if line_idx < start || line_idx > end {
@@ -101,8 +104,10 @@ pub(crate) fn find_field_range(
                     let prefix_len = line.len() - trimmed.len();
                     let start_col = prefix_len;
                     let end_col = start_col + field.len();
-                    let start_pos = tower_lsp::lsp_types::Position::new(line_idx as u32, start_col as u32);
-                    let end_pos = tower_lsp::lsp_types::Position::new(line_idx as u32, end_col as u32);
+                    let start_pos =
+                        tower_lsp::lsp_types::Position::new(line_idx as u32, start_col as u32);
+                    let end_pos =
+                        tower_lsp::lsp_types::Position::new(line_idx as u32, end_col as u32);
                     return (start_pos, end_pos);
                 }
             }
@@ -164,7 +169,11 @@ pub(crate) fn link_at_position(text: &str, line_idx: usize, column: usize) -> Op
     while i < len {
         // Wikilink / embed: [[target]] or ![[target]]
         if i + 1 < len && chars[i] == '[' && chars[i + 1] == '[' {
-            let link_start = if i > 0 && chars[i - 1] == '!' { i - 1 } else { i };
+            let link_start = if i > 0 && chars[i - 1] == '!' {
+                i - 1
+            } else {
+                i
+            };
             i += 2; // skip [[
             let content_start = i;
             while i < len && !(chars[i] == ']' && i + 1 < len && chars[i + 1] == ']') {
@@ -194,12 +203,20 @@ pub(crate) fn link_at_position(text: &str, line_idx: usize, column: usize) -> Op
 
         // Markdown link / image: [text](path) or ![alt](path)
         if chars[i] == '[' {
-            let link_start = if i > 0 && chars[i - 1] == '!' { i - 1 } else { i };
+            let link_start = if i > 0 && chars[i - 1] == '!' {
+                i - 1
+            } else {
+                i
+            };
             i += 1; // skip [
             let mut bracket_depth = 1;
             while i < len && bracket_depth > 0 {
-                if chars[i] == '[' { bracket_depth += 1; }
-                if chars[i] == ']' { bracket_depth -= 1; }
+                if chars[i] == '[' {
+                    bracket_depth += 1;
+                }
+                if chars[i] == ']' {
+                    bracket_depth -= 1;
+                }
                 i += 1;
             }
             // Expect (path) immediately after ]
@@ -208,8 +225,12 @@ pub(crate) fn link_at_position(text: &str, line_idx: usize, column: usize) -> Op
                 let paren_start = i;
                 let mut paren_depth = 1;
                 while i < len && paren_depth > 0 {
-                    if chars[i] == '(' { paren_depth += 1; }
-                    if chars[i] == ')' { paren_depth -= 1; }
+                    if chars[i] == '(' {
+                        paren_depth += 1;
+                    }
+                    if chars[i] == ')' {
+                        paren_depth -= 1;
+                    }
                     i += 1;
                 }
                 let path: String = chars[paren_start..i - 1].iter().collect();

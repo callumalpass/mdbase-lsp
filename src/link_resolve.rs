@@ -1,5 +1,4 @@
 /// Resolve body link targets to file paths within the collection.
-
 use std::path::PathBuf;
 
 use tower_lsp::lsp_types::Url;

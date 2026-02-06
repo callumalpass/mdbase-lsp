@@ -6,11 +6,14 @@ use tracing::debug;
 use crate::collection_utils;
 use crate::text;
 
+#[derive(Debug, Clone)]
 pub(crate) struct FileEntry {
     pub rel_path: String,
     pub types: Vec<String>,
     pub tags: Vec<String>,
     pub display_name: Option<String>,
+    pub title: Option<String>,
+    pub id: Option<String>,
     pub preview: Option<String>,
 }
 
@@ -46,43 +49,36 @@ impl FileIndex {
                 continue;
             }
 
-            let types = collection.determine_types_for_path(&parsed.json, Some(&rel_path));
-            let display_name = resolve_display_name(collection, &types, &parsed.json);
-            let preview = build_preview(&content);
-
-            let mut tags = Vec::new();
-            if let Some(arr) = parsed.json.get("tags").and_then(|v| v.as_array()) {
-                for tag_val in arr {
-                    if let Some(tag) = tag_val.as_str() {
-                        if !tags.contains(&tag.to_string()) {
-                            tags.push(tag.to_string());
-                        }
-                    }
-                }
-            } else if let Some(tag) = parsed.json.get("tags").and_then(|v| v.as_str()) {
-                if !tags.contains(&tag.to_string()) {
-                    tags.push(tag.to_string());
-                }
+            if let Some(entry) = build_entry(collection, rel_path, &content, &parsed.json) {
+                entries.push(entry);
             }
-            let parsed_doc = mdbase::frontmatter::parser::parse_document(&content);
-            let body_tags = mdbase::expressions::evaluator::extract_tags_from_body(&parsed_doc.body);
-            for tag in body_tags {
-                if !tags.contains(&tag) {
-                    tags.push(tag);
-                }
-            }
-
-            entries.push(FileEntry {
-                rel_path,
-                types,
-                tags,
-                display_name,
-                preview,
-            });
         }
 
         debug!(count = entries.len(), "file_index: rebuilt");
         *self.entries.write().unwrap() = entries;
+    }
+
+    /// Upsert a single file entry from in-memory text.
+    pub fn upsert_from_text(&self, collection: &Collection, rel_path: String, text: &str) {
+        let parsed = text::parse_frontmatter(text);
+        if parsed.parse_error || parsed.mapping_error {
+            return;
+        }
+        let Some(entry) = build_entry(collection, rel_path.clone(), text, &parsed.json) else {
+            return;
+        };
+        let mut entries = self.entries.write().unwrap();
+        if let Some(existing) = entries.iter_mut().find(|e| e.rel_path == rel_path) {
+            *existing = entry;
+        } else {
+            entries.push(entry);
+        }
+    }
+
+    /// Remove a file entry by its collection-relative path.
+    pub fn remove_path(&self, rel_path: &str) {
+        let mut entries = self.entries.write().unwrap();
+        entries.retain(|e| e.rel_path != rel_path);
     }
 
     /// Return rel_paths that match `target_type` (or all files if None).
@@ -110,76 +106,58 @@ impl FileIndex {
                 Some(tt) => e.types.iter().any(|t| t.eq_ignore_ascii_case(tt)),
                 None => true,
             })
-            .map(|e| (e.rel_path.clone(), e.display_name.clone(), e.preview.clone()))
+            .map(|e| {
+                (
+                    e.rel_path.clone(),
+                    e.display_name.clone(),
+                    e.preview.clone(),
+                )
+            })
             .collect()
     }
 
-    /// Return all unique tags across the collection, sorted.
-    pub fn all_tags(&self) -> Vec<String> {
+    pub fn all_entries(&self) -> Vec<FileEntry> {
+        self.entries.read().unwrap().clone()
+    }
+
+    pub fn tag_counts(&self) -> Vec<(String, usize)> {
         let entries = self.entries.read().unwrap();
-        let mut tags = Vec::new();
+        let mut counts = std::collections::HashMap::<String, usize>::new();
         for entry in entries.iter() {
             for tag in &entry.tags {
-                if !tags.contains(tag) {
-                    tags.push(tag.clone());
-                }
+                *counts.entry(tag.clone()).or_default() += 1;
             }
         }
-        tags.sort();
-        tags
+        let mut result: Vec<(String, usize)> = counts.into_iter().collect();
+        result.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        result
     }
 }
 
-fn resolve_display_name(
+fn build_entry(
     collection: &Collection,
-    type_names: &[String],
+    rel_path: String,
+    content: &str,
     frontmatter: &serde_json::Value,
-) -> Option<String> {
-    let mut candidates = Vec::new();
-    if type_names.is_empty() {
-        for type_def in collection.types.values() {
-            if let Some(name) = &type_def.display_name {
-                candidates.push(name.clone());
-            }
-        }
-    } else {
-        for type_name in type_names {
-            if let Some(type_def) = collection.types.get(type_name) {
-                if let Some(name) = &type_def.display_name {
-                    candidates.push(name.clone());
-                }
-            }
-        }
-    }
-
-    let mut seen = std::collections::HashSet::new();
-    for field in candidates {
-        if !seen.insert(field.clone()) {
-            continue;
-        }
-        if let Some(value) = frontmatter.get(&field).and_then(|v| v.as_str()) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-
-    if let Some(value) = frontmatter.get("display-name").and_then(|v| v.as_str()) {
-        let value = value.trim();
-        if !value.is_empty() {
-            return Some(value.to_string());
-        }
-    }
-
-    if let Some(value) = frontmatter.get("title").and_then(|v| v.as_str()) {
-        let value = value.trim();
-        if !value.is_empty() {
-            return Some(value.to_string());
-        }
-    }
-
-    None
+) -> Option<FileEntry> {
+    let types = collection.determine_types_for_path(frontmatter, Some(&rel_path));
+    let title = json_string(frontmatter, "title");
+    let id = json_string(frontmatter, "id");
+    let display_name = title
+        .clone()
+        .or_else(|| json_string(frontmatter, "name"))
+        .or_else(|| id.clone());
+    let preview = build_preview(content);
+    let tags = collect_tags(content, frontmatter);
+    Some(FileEntry {
+        rel_path,
+        types,
+        tags,
+        display_name,
+        title,
+        id,
+        preview,
+    })
 }
 
 fn build_preview(content: &str) -> Option<String> {
@@ -192,4 +170,38 @@ fn build_preview(content: &str) -> Option<String> {
         preview.push_str("...");
     }
     Some(preview)
+}
+
+fn collect_tags(content: &str, frontmatter: &serde_json::Value) -> Vec<String> {
+    let mut tags = Vec::new();
+    if let Some(arr) = frontmatter.get("tags").and_then(|v| v.as_array()) {
+        for tag_val in arr {
+            if let Some(tag) = tag_val.as_str() {
+                if !tags.contains(&tag.to_string()) {
+                    tags.push(tag.to_string());
+                }
+            }
+        }
+    } else if let Some(tag) = frontmatter.get("tags").and_then(|v| v.as_str()) {
+        if !tags.contains(&tag.to_string()) {
+            tags.push(tag.to_string());
+        }
+    }
+    let parsed_doc = mdbase::frontmatter::parser::parse_document(content);
+    let body_tags = mdbase::expressions::evaluator::extract_tags_from_body(&parsed_doc.body);
+    for tag in body_tags {
+        if !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    tags
+}
+
+fn json_string(frontmatter: &serde_json::Value, key: &str) -> Option<String> {
+    let value = frontmatter.get(key)?.as_str()?.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }

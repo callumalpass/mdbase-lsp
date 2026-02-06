@@ -13,7 +13,8 @@
   "activationEvents": [
     "onLanguage:markdown",
     "onCommand:mdbase.createFile",
-    "onCommand:mdbase.validateCollection"
+    "onCommand:mdbase.validateCollection",
+    "onCommand:mdbase.queryCollection"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -25,6 +26,10 @@
       {
         "command": "mdbase.validateCollection",
         "title": "mdbase: Validate Collection"
+      },
+      {
+        "command": "mdbase.queryCollection",
+        "title": "mdbase: Query Collection"
       }
     ],
     "configurationDefaults": {
@@ -68,8 +73,9 @@
     "typescript": "^5.0.0"
   },
   "scripts": {
+    "vscode:prepublish": "npm run compile",
     "compile": "tsc -p .",
     "watch": "tsc -watch -p .",
-    "package": "npx @vscode/vsce package"
+    "package": "npm run compile && npx @vscode/vsce package"
   }
 }

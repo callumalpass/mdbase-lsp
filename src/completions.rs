@@ -1,5 +1,5 @@
-use tracing::{debug, warn};
 use tower_lsp::lsp_types::*;
+use tracing::{debug, warn};
 
 use crate::state::BackendState;
 use crate::text;
@@ -7,11 +7,7 @@ use crate::text;
 use mdbase::types::schema::FieldDef;
 
 /// Provide completions at the given position.
-pub fn provide(
-    state: &BackendState,
-    uri: &Url,
-    position: Position,
-) -> Option<CompletionResponse> {
+pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<CompletionResponse> {
     let collection = match state.get_collection() {
         Some(c) => c,
         None => {
@@ -32,11 +28,18 @@ pub fn provide(
 
     // Check for link completion context first — works in both body and frontmatter
     if let Some(ctx) = text::link_completion_context(&line_text, column) {
-        let rel_path = uri.to_file_path().ok()
-            .and_then(|p| p.strip_prefix(&collection.root).ok().map(|r| r.to_string_lossy().to_string().replace('\\', "/")));
-        return Some(CompletionResponse::Array(
-            provide_link_completions(state, &ctx, line_idx, column, rel_path.as_deref()),
-        ));
+        let rel_path = uri.to_file_path().ok().and_then(|p| {
+            p.strip_prefix(&collection.root)
+                .ok()
+                .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
+        });
+        return Some(CompletionResponse::Array(provide_link_completions(
+            state,
+            &ctx,
+            line_idx,
+            column,
+            rel_path.as_deref(),
+        )));
     }
 
     let in_frontmatter = text::is_in_frontmatter(&text, line_idx);
@@ -47,7 +50,9 @@ pub fn provide(
         let colon_idx = line_text.find(':');
         let is_field_name_pos = colon_idx.is_none() || column <= colon_idx.unwrap_or(0);
 
-        let parsed = state.documents.get(uri)
+        let parsed = state
+            .documents
+            .get(uri)
             .map(|doc| doc.frontmatter())
             .unwrap_or_else(|| text::parse_frontmatter(&text));
 
@@ -60,21 +65,30 @@ pub fn provide(
                 debug!(uri = %uri, "completion: still invalid after removing line");
                 return None;
             }
-            let rel_path = uri.to_file_path().ok()
-                .and_then(|p| p.strip_prefix(&collection.root).ok().map(|r| r.to_string_lossy().to_string().replace('\\', "/")));
-            let type_names = collection.determine_types_for_path(&patched.json, rel_path.as_deref());
+            let rel_path = uri.to_file_path().ok().and_then(|p| {
+                p.strip_prefix(&collection.root)
+                    .ok()
+                    .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
+            });
+            let type_names =
+                collection.determine_types_for_path(&patched.json, rel_path.as_deref());
             debug!(uri = %uri, ?type_names, "completion: resolved types (patched)");
-            let existing: std::collections::HashSet<String> = patched.json.as_object()
+            let existing: std::collections::HashSet<String> = patched
+                .json
+                .as_object()
                 .map(|m| m.keys().cloned().collect())
                 .unwrap_or_default();
             let fields = fields_for_types(&collection, &type_names);
-            let items: Vec<CompletionItem> = fields.into_iter()
+            let items: Vec<CompletionItem> = fields
+                .into_iter()
                 .filter(|(name, _)| !existing.contains(name))
                 .map(|(name, def)| {
                     let mut item = CompletionItem::new_simple(name.clone(), field_detail(&def));
                     item.kind = Some(CompletionItemKind::FIELD);
+                    item.documentation = field_documentation(&def);
                     item
-                }).collect();
+                })
+                .collect();
             return Some(CompletionResponse::Array(items));
         }
 
@@ -83,23 +97,31 @@ pub fn provide(
             return None;
         }
 
-        let rel_path = uri.to_file_path().ok()
-            .and_then(|p| p.strip_prefix(&collection.root).ok().map(|r| r.to_string_lossy().to_string().replace('\\', "/")));
+        let rel_path = uri.to_file_path().ok().and_then(|p| {
+            p.strip_prefix(&collection.root)
+                .ok()
+                .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
+        });
         let type_names = collection.determine_types_for_path(&parsed.json, rel_path.as_deref());
         debug!(uri = %uri, ?type_names, "completion: resolved types");
 
         if is_field_name_pos {
-            let existing: std::collections::HashSet<String> = parsed.json.as_object()
+            let existing: std::collections::HashSet<String> = parsed
+                .json
+                .as_object()
                 .map(|m| m.keys().cloned().collect())
                 .unwrap_or_default();
             let fields = fields_for_types(&collection, &type_names);
-            let items: Vec<CompletionItem> = fields.into_iter()
+            let items: Vec<CompletionItem> = fields
+                .into_iter()
                 .filter(|(name, _)| !existing.contains(name))
                 .map(|(name, def)| {
                     let mut item = CompletionItem::new_simple(name.clone(), field_detail(&def));
                     item.kind = Some(CompletionItemKind::FIELD);
+                    item.documentation = field_documentation(&def);
                     item
-                }).collect();
+                })
+                .collect();
             return Some(CompletionResponse::Array(items));
         }
 
@@ -108,11 +130,15 @@ pub fn provide(
             if let Some(field_def) = field_def_for_types(&collection, &type_names, &field_name) {
                 debug!(uri = %uri, field_name = %field_name, field_type = %field_def.field_type, has_values = field_def.values.is_some(), "completion: found field def");
                 if let Some(values) = &field_def.values {
-                    let items = values.iter().map(|v| CompletionItem {
-                        label: v.clone(),
-                        kind: Some(CompletionItemKind::ENUM_MEMBER),
-                        ..Default::default()
-                    }).collect();
+                    let items = values
+                        .iter()
+                        .map(|v| CompletionItem {
+                            label: v.clone(),
+                            kind: Some(CompletionItemKind::ENUM_MEMBER),
+                            detail: Some(format!("{} value", field_name)),
+                            ..Default::default()
+                        })
+                        .collect();
                     return Some(CompletionResponse::Array(items));
                 }
                 if field_def.field_type == "boolean" {
@@ -144,7 +170,10 @@ pub fn provide(
     None
 }
 
-fn fields_for_types(collection: &mdbase::Collection, type_names: &[String]) -> Vec<(String, FieldDef)> {
+fn fields_for_types(
+    collection: &mdbase::Collection,
+    type_names: &[String],
+) -> Vec<(String, FieldDef)> {
     let mut fields = std::collections::HashMap::new();
     if type_names.is_empty() {
         for type_def in collection.types.values() {
@@ -201,6 +230,30 @@ fn field_detail(def: &FieldDef) -> String {
     parts.join(", ")
 }
 
+fn field_documentation(def: &FieldDef) -> Option<Documentation> {
+    let mut lines = Vec::new();
+    if let Some(desc) = &def.description {
+        lines.push(desc.clone());
+    }
+    if let Some(values) = &def.values {
+        lines.push(format!("Allowed: {}", values.join(", ")));
+    }
+    if let Some(default) = &def.default {
+        lines.push(format!("Default: {}", default));
+    }
+    if let Some(deprecated) = &def.deprecated {
+        lines.push(format!("Deprecated: {}", deprecated));
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: lines.join("\n\n"),
+        }))
+    }
+}
+
 fn is_link_field(def: &FieldDef) -> bool {
     if def.field_type == "link" {
         return true;
@@ -223,11 +276,10 @@ fn link_target_type(def: &FieldDef) -> Option<String> {
     }
 }
 
-fn link_target_completions(
-    state: &BackendState,
-    target_type: Option<&str>,
-) -> Vec<CompletionItem> {
-    state.file_index.link_targets(target_type)
+fn link_target_completions(state: &BackendState, target_type: Option<&str>) -> Vec<CompletionItem> {
+    state
+        .file_index
+        .link_targets(target_type)
         .into_iter()
         .map(|rel_path| CompletionItem {
             label: rel_path,
@@ -248,11 +300,14 @@ fn remove_line(text: &str, line_idx: usize) -> String {
 }
 
 fn tag_completions(state: &BackendState) -> Vec<CompletionItem> {
-    state.file_index.all_tags()
+    state
+        .file_index
+        .tag_counts()
         .into_iter()
-        .map(|tag| CompletionItem {
+        .map(|(tag, count)| CompletionItem {
             label: tag,
             kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some(format!("used {} times", count)),
             ..Default::default()
         })
         .collect()
@@ -273,54 +328,52 @@ fn provide_link_completions(
 
     targets
         .into_iter()
-        .map(|(rel_path, display_name, preview)| {
-            match ctx.kind {
-                text::LinkCompletionKind::Wikilink => {
-                    let stem = rel_path.strip_suffix(".md").unwrap_or(&rel_path);
-                    let label = display_name.clone().unwrap_or_else(|| stem.to_string());
-                    let insert_text = match display_name.as_deref() {
-                        Some(name) if !name.is_empty() && name != stem => {
-                            format!("{}|{}", stem, name)
-                        }
-                        _ => stem.to_string(),
-                    };
-                    let filter_text = display_name.as_ref().map(|d| {
-                        format!("{} {} {}", d, stem, rel_path)
-                    });
-                    let documentation = preview.map(|p| {
-                        Documentation::MarkupContent(MarkupContent {
-                            kind: MarkupKind::PlainText,
-                            value: p,
-                        })
-                    });
-                    CompletionItem {
-                        label,
-                        detail: Some(rel_path.clone()),
-                        kind: Some(CompletionItemKind::FILE),
-                        filter_text,
-                        documentation,
-                        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                            range: edit_range,
-                            new_text: insert_text,
-                        })),
-                        ..Default::default()
+        .map(|(rel_path, display_name, preview)| match ctx.kind {
+            text::LinkCompletionKind::Wikilink => {
+                let stem = rel_path.strip_suffix(".md").unwrap_or(&rel_path);
+                let label = display_name.clone().unwrap_or_else(|| stem.to_string());
+                let insert_text = match display_name.as_deref() {
+                    Some(name) if !name.is_empty() && name != stem => {
+                        format!("{}|{}", stem, name)
                     }
+                    _ => stem.to_string(),
+                };
+                let filter_text = display_name
+                    .as_ref()
+                    .map(|d| format!("{} {} {}", d, stem, rel_path));
+                let documentation = preview.map(|p| {
+                    Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::PlainText,
+                        value: p,
+                    })
+                });
+                CompletionItem {
+                    label,
+                    detail: Some(rel_path.clone()),
+                    kind: Some(CompletionItemKind::FILE),
+                    filter_text,
+                    documentation,
+                    text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                        range: edit_range,
+                        new_text: insert_text,
+                    })),
+                    ..Default::default()
                 }
-                text::LinkCompletionKind::Markdown => {
-                    let label = match source_rel_path {
-                        Some(src) => relative_path_from(src, &rel_path),
-                        None => rel_path.clone(),
-                    };
-                    CompletionItem {
-                        label: label.clone(),
-                        detail: Some(rel_path.clone()),
-                        kind: Some(CompletionItemKind::FILE),
-                        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                            range: edit_range,
-                            new_text: label,
-                        })),
-                        ..Default::default()
-                    }
+            }
+            text::LinkCompletionKind::Markdown => {
+                let label = match source_rel_path {
+                    Some(src) => relative_path_from(src, &rel_path),
+                    None => rel_path.clone(),
+                };
+                CompletionItem {
+                    label: label.clone(),
+                    detail: Some(rel_path.clone()),
+                    kind: Some(CompletionItemKind::FILE),
+                    text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                        range: edit_range,
+                        new_text: label,
+                    })),
+                    ..Default::default()
                 }
             }
         })

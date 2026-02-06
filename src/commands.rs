@@ -17,6 +17,7 @@ pub async fn execute(
         "mdbase.createFile" => create_file(client, state, args).await,
         "mdbase.typeInfo" => type_info(state, args).await,
         "mdbase.validateCollection" => validate_collection(client, state).await,
+        "mdbase.queryCollection" => query_collection(state, args).await,
         _ => {
             client
                 .log_message(
@@ -42,7 +43,10 @@ async fn type_info(
         None => return Ok(None),
     };
 
-    let input = args.get(0).cloned().unwrap_or_else(|| serde_json::json!({}));
+    let input = args
+        .get(0)
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
     let type_name = match input.get("type").and_then(|v| v.as_str()) {
         Some(t) => t.to_lowercase(),
         None => return Ok(None),
@@ -149,10 +153,10 @@ async fn create_file(
                 }
             }
 
-            input.as_object_mut().unwrap().insert(
-                "frontmatter".to_string(),
-                serde_json::Value::Object(fm_obj),
-            );
+            input
+                .as_object_mut()
+                .unwrap()
+                .insert("frontmatter".to_string(), serde_json::Value::Object(fm_obj));
         }
     }
 
@@ -306,16 +310,23 @@ async fn validate_collection(
     client: &Client,
     state: &BackendState,
 ) -> Result<Option<serde_json::Value>> {
-    let collection = match state.get_collection() {
-        Some(c) => c,
-        None => {
-            client
-                .log_message(MessageType::ERROR, "mdbase collection not loaded")
-                .await;
-            return Ok(None);
-        }
+    let Some(result) = crate::diagnostics::publish_collection(client, state).await else {
+        client
+            .log_message(MessageType::ERROR, "mdbase collection not loaded")
+            .await;
+        return Ok(None);
     };
-
-    let result = collection.validate_op(&serde_json::json!({}));
     Ok(Some(result))
+}
+
+async fn query_collection(
+    state: &BackendState,
+    args: &[serde_json::Value],
+) -> Result<Option<serde_json::Value>> {
+    let query = args
+        .get(0)
+        .and_then(|v| v.get("query"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    Ok(Some(crate::symbols::query_collection(state, query)))
 }

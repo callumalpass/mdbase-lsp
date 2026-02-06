@@ -89,7 +89,10 @@ impl BackendState {
         info!(root = %root.display(), "get_collection: opening collection");
         match Collection::open(&root) {
             Ok(collection) => {
-                info!(types = collection.types.len(), "get_collection: loaded collection");
+                info!(
+                    types = collection.types.len(),
+                    "get_collection: loaded collection"
+                );
                 let arc = Arc::new(collection);
                 *self.collection.write().unwrap() = Some(arc.clone());
                 Some(arc)
