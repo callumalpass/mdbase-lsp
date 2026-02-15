@@ -62,9 +62,97 @@ Install the extension from `editors/vscode/`. It registers the
 
 ### Neovim (0.11+)
 
+#### lazy.nvim (auto-download latest release)
+
 ```lua
+local function mdbase_lsp_paths()
+  local data = vim.fn.stdpath("data")
+  local dir = data .. "/mdbase-lsp"
+  local bin = dir .. "/mdbase-lsp"
+  if vim.fn.has("win32") == 1 then
+    bin = bin .. ".exe"
+  end
+  return dir, bin
+end
+
+local function detect_target()
+  if vim.fn.has("win32") == 1 then
+    return "win32-x64"
+  end
+  if vim.fn.has("mac") == 1 then
+    local arch = vim.fn.system({ "uname", "-m" }):gsub("%s+", "")
+    if arch == "arm64" or arch == "aarch64" then
+      return "darwin-arm64"
+    end
+    return "darwin-x64"
+  end
+  return "linux-x64"
+end
+
+local function latest_release_asset()
+  local json = vim.fn.system({
+    "curl",
+    "-sL",
+    "https://api.github.com/repos/callumalpass/mdbase-lsp/releases/latest",
+  })
+  local ok, data = pcall(vim.fn.json_decode, json)
+  if not ok or type(data) ~= "table" then
+    return nil, nil
+  end
+
+  local target = detect_target()
+  local name = ({
+    ["linux-x64"] = "mdbase-lsp-linux-x64.tar.gz",
+    ["darwin-x64"] = "mdbase-lsp-darwin-x64.tar.gz",
+    ["darwin-arm64"] = "mdbase-lsp-darwin-arm64.tar.gz",
+    ["win32-x64"] = "mdbase-lsp-win32-x64.zip",
+  })[target]
+
+  for _, asset in ipairs(data.assets or {}) do
+    if asset.name == name then
+      return asset.browser_download_url, name
+    end
+  end
+
+  return nil, nil
+end
+
+local function install_mdbase_lsp()
+  local dir, bin = mdbase_lsp_paths()
+  vim.fn.mkdir(dir, "p")
+
+  local url, name = latest_release_asset()
+  if not url or not name then
+    vim.notify("mdbase-lsp: failed to find release asset", vim.log.levels.ERROR)
+    return
+  end
+
+  local archive = dir .. "/" .. name
+  vim.fn.system({ "curl", "-fL", "-o", archive, url })
+
+  if vim.fn.has("win32") == 1 then
+    local cmd = ("Expand-Archive -Force -Path '%s' -DestinationPath '%s'"):format(archive, dir)
+    vim.fn.system({ "powershell", "-NoProfile", "-Command", cmd })
+  else
+    vim.fn.system({ "tar", "xzf", archive, "-C", dir })
+    vim.fn.system({ "chmod", "+x", bin })
+  end
+end
+
+require("lazy").setup({
+  {
+    "callumalpass/mdbase-lsp",
+    build = install_mdbase_lsp,
+  },
+})
+```
+
+Use `:Lazy build mdbase-lsp` to force a refresh of the binary.
+
+```lua
+local data_dir = vim.fn.stdpath("data")
 vim.lsp.config("mdbase", {
-  cmd = { "/path/to/mdbase-lsp" },
+  cmd = { data_dir .. "/mdbase-lsp/mdbase-lsp" },
   filetypes = { "markdown" },
   root_markers = { ".mdbase", ".git" },
   capabilities = {
