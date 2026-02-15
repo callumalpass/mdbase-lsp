@@ -351,6 +351,7 @@ fn provide_link_completions(
                     label,
                     detail: Some(rel_path.clone()),
                     kind: Some(CompletionItemKind::FILE),
+                    insert_text: Some(insert_text.clone()),
                     filter_text,
                     documentation,
                     text_edit: Some(CompletionTextEdit::Edit(TextEdit {
