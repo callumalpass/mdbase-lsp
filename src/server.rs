@@ -119,9 +119,13 @@ impl LanguageServer for MdbaseLanguageServer {
         );
         if let Some(collection) = self.state.get_collection() {
             if let Some(rel_path) = crate::collection_utils::rel_path_from_uri(&collection, &uri) {
-                self.state
-                    .file_index
-                    .upsert_from_text(&collection, rel_path, &text);
+                if crate::collection_utils::should_index_rel_path(&collection, &rel_path) {
+                    self.state
+                        .file_index
+                        .upsert_from_text(&collection, rel_path, &text);
+                } else {
+                    self.state.file_index.remove_path(&rel_path);
+                }
             }
         }
         // Immediate diagnostics on open
@@ -163,7 +167,20 @@ impl LanguageServer for MdbaseLanguageServer {
         let uri = &params.text_document.uri;
         if let Some(collection) = self.state.get_collection() {
             if let Some(rel_path) = crate::collection_utils::rel_path_from_uri(&collection, uri) {
-                self.state.file_index.remove_path(&rel_path);
+                if crate::collection_utils::should_index_rel_path(&collection, &rel_path) {
+                    let abs_path = collection.root.join(&rel_path);
+                    if let Ok(on_disk_text) = std::fs::read_to_string(&abs_path) {
+                        self.state.file_index.upsert_from_text(
+                            &collection,
+                            rel_path,
+                            &on_disk_text,
+                        );
+                    } else {
+                        self.state.file_index.remove_path(&rel_path);
+                    }
+                } else {
+                    self.state.file_index.remove_path(&rel_path);
+                }
             }
         }
         self.state.documents.remove(uri);
@@ -262,10 +279,14 @@ impl LanguageServer for MdbaseLanguageServer {
         // Incrementally update file index for this saved file.
         if let Some(collection) = self.state.get_collection() {
             if let Some(rel_path) = crate::collection_utils::rel_path_from_uri(&collection, &uri) {
-                if let Some(text) = self.state.document_text(&uri) {
-                    self.state
-                        .file_index
-                        .upsert_from_text(&collection, rel_path, &text);
+                if crate::collection_utils::should_index_rel_path(&collection, &rel_path) {
+                    if let Some(text) = self.state.document_text(&uri) {
+                        self.state
+                            .file_index
+                            .upsert_from_text(&collection, rel_path, &text);
+                    }
+                } else {
+                    self.state.file_index.remove_path(&rel_path);
                 }
             }
         }
@@ -334,10 +355,28 @@ impl LanguageServer for MdbaseLanguageServer {
     }
 }
 
-/// Convert an LSP Position to a byte offset in a Rope.
+/// Convert an LSP `Position` (UTF-16 columns) to a rope char offset.
 fn offset_from_position(rope: &ropey::Rope, pos: Position) -> usize {
-    let line_start = rope.line_to_char(pos.line as usize);
-    line_start + pos.character as usize
+    let max_line = rope.len_lines().saturating_sub(1);
+    let line_idx = (pos.line as usize).min(max_line);
+    let line_start = rope.line_to_char(line_idx);
+    let line = rope.line(line_idx);
+    line_start + char_offset_from_utf16_col(line, pos.character as usize)
+}
+
+fn char_offset_from_utf16_col(line: ropey::RopeSlice<'_>, utf16_col: usize) -> usize {
+    let mut utf16_count = 0usize;
+    for (char_idx, ch) in line.chars().enumerate() {
+        if utf16_count == utf16_col {
+            return char_idx;
+        }
+        utf16_count += ch.len_utf16();
+        if utf16_count > utf16_col {
+            // Invalid mid-surrogate position: clamp forward to avoid splitting.
+            return char_idx + 1;
+        }
+    }
+    line.len_chars()
 }
 
 /// Build a TextEdit that sets a NowOnWrite field value in YAML frontmatter.
@@ -379,4 +418,24 @@ fn make_now_on_write_edit(
         },
         new_text: format!("{}: {}\n", field_name, value),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offset_from_position_handles_utf16_columns() {
+        let rope = ropey::Rope::from_str("a😀b\n");
+        assert_eq!(offset_from_position(&rope, Position::new(0, 0)), 0);
+        assert_eq!(offset_from_position(&rope, Position::new(0, 1)), 1);
+        assert_eq!(offset_from_position(&rope, Position::new(0, 3)), 2);
+        assert_eq!(offset_from_position(&rope, Position::new(0, 4)), 3);
+    }
+
+    #[test]
+    fn offset_from_position_clamps_line_out_of_bounds() {
+        let rope = ropey::Rope::from_str("abc");
+        assert_eq!(offset_from_position(&rope, Position::new(99, 2)), 2);
+    }
 }

@@ -362,6 +362,11 @@ pub(crate) fn rel_path_from_uri(collection: &Collection, uri: &Url) -> Option<St
         .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
 }
 
+/// Return whether a collection-relative path should be included in indexing.
+pub(crate) fn should_index_rel_path(collection: &Collection, rel_path: &str) -> bool {
+    !is_excluded(collection, rel_path) && is_valid_extension(collection, rel_path)
+}
+
 pub(crate) fn uri_from_rel_path(collection: &Collection, rel_path: &str) -> Option<Url> {
     Url::from_file_path(collection.root.join(rel_path)).ok()
 }
