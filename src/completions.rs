@@ -24,50 +24,33 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Co
     let line_idx = position.line as usize;
     let line_text = text.lines().nth(line_idx).unwrap_or("").to_string();
     let column = position.character as usize;
+    let in_frontmatter = text::is_in_frontmatter(&text, line_idx)
+        || text::is_in_frontmatter_edit_region(&text, line_idx);
 
     // Check for link completion context first — works in both body and frontmatter
     if let Some(link_ctx) = text::link_completion_context(&line_text, column) {
+        let target_type = if in_frontmatter {
+            link_target_type_for_position(state, uri, &text, line_idx, collection, &source_rel_path)
+        } else {
+            None
+        };
         return Some(CompletionResponse::Array(provide_link_completions(
             &ctx.file_index,
             &link_ctx,
             line_idx,
             column,
             Some(&source_rel_path),
+            target_type.as_deref(),
         )));
     }
 
-    let in_frontmatter = text::is_in_frontmatter(&text, line_idx)
-        || text::is_in_frontmatter_edit_region(&text, line_idx);
     if !in_frontmatter {
         debug!(uri = %uri, line = line_idx, "completion: not in frontmatter");
     }
     if in_frontmatter {
         let is_field_name_pos = is_field_name_position(&line_text, column);
 
-        let mut parsed = if text::has_unclosed_frontmatter(&text) {
-            parse_frontmatter_for_completion(&text)
-        } else {
-            state
-                .documents
-                .get(uri)
-                .map(|doc| doc.frontmatter())
-                .unwrap_or_else(|| text::parse_frontmatter(&text))
-        };
-
-        // During active edits, the current line is often temporarily invalid YAML.
-        // Remove that line and re-parse so completions can still resolve types.
-        if parsed.parse_error || parsed.mapping_error {
-            debug!(
-                uri = %uri,
-                "completion: frontmatter invalid, trying with current line removed"
-            );
-            let patched = parse_frontmatter_for_completion(&remove_line(&text, line_idx));
-            if patched.parse_error || patched.mapping_error {
-                debug!(uri = %uri, "completion: still invalid after removing line");
-                return None;
-            }
-            parsed = patched;
-        }
+        let parsed = parsed_frontmatter_with_recovery(state, uri, &text, line_idx)?;
 
         let type_names = collection.determine_types_for_path(&parsed.json, Some(&source_rel_path));
         debug!(uri = %uri, ?type_names, "completion: resolved types");
@@ -288,6 +271,53 @@ fn parse_frontmatter_for_completion(text: &str) -> text::ParsedFrontmatter {
     text::parse_frontmatter(&synthetic)
 }
 
+fn parsed_frontmatter_with_recovery(
+    state: &BackendState,
+    uri: &Url,
+    text: &str,
+    line_idx: usize,
+) -> Option<text::ParsedFrontmatter> {
+    let mut parsed = if text::has_unclosed_frontmatter(text) {
+        parse_frontmatter_for_completion(text)
+    } else {
+        state
+            .documents
+            .get(uri)
+            .map(|doc| doc.frontmatter())
+            .unwrap_or_else(|| text::parse_frontmatter(text))
+    };
+
+    if parsed.parse_error || parsed.mapping_error {
+        debug!(
+            uri = %uri,
+            "completion: frontmatter invalid, trying with current line removed"
+        );
+        let patched = parse_frontmatter_for_completion(&remove_line(text, line_idx));
+        if patched.parse_error || patched.mapping_error {
+            debug!(uri = %uri, "completion: still invalid after removing line");
+            return None;
+        }
+        parsed = patched;
+    }
+
+    Some(parsed)
+}
+
+fn link_target_type_for_position(
+    state: &BackendState,
+    uri: &Url,
+    text: &str,
+    line_idx: usize,
+    collection: &mdbase::Collection,
+    source_rel_path: &str,
+) -> Option<String> {
+    let field_name = text::field_name_for_position(text, line_idx)?;
+    let parsed = parsed_frontmatter_with_recovery(state, uri, text, line_idx)?;
+    let type_names = collection.determine_types_for_path(&parsed.json, Some(source_rel_path));
+    let field_def = field_def_for_types(collection, &type_names, &field_name)?;
+    link_target_type(&field_def)
+}
+
 fn is_field_name_position(line: &str, column: usize) -> bool {
     if is_yaml_list_item_line(line) {
         return false;
@@ -323,15 +353,16 @@ fn provide_link_completions(
     line_idx: usize,
     column: usize,
     source_rel_path: Option<&str>,
+    target_type: Option<&str>,
 ) -> Vec<CompletionItem> {
-    let targets = file_index.link_targets_with_display(None);
+    let targets = file_index.link_targets_with_display(target_type);
     let edit_range = Range {
         start: Position::new(line_idx as u32, ctx.start_col as u32),
         end: Position::new(line_idx as u32, column as u32),
     };
     let prefix = ctx.prefix.trim().to_lowercase();
 
-    let mut candidates: Vec<(usize, String, CompletionItem)> = targets
+    let mut candidates: Vec<(usize, usize, String, CompletionItem)> = targets
         .into_iter()
         .filter_map(|(rel_path, display_name, preview)| match ctx.kind {
             text::LinkCompletionKind::Wikilink => {
@@ -367,8 +398,10 @@ fn provide_link_completions(
                     &stem.to_lowercase(),
                     &rel_path.to_lowercase(),
                 );
+                let quality = completion_quality(&rel_path, display_name.is_some());
                 Some((
                     rank,
+                    quality,
                     label.clone(),
                     CompletionItem {
                         label,
@@ -400,8 +433,10 @@ fn provide_link_completions(
                     &label.to_lowercase(),
                     &rel_path.to_lowercase(),
                 );
+                let quality = completion_quality(&rel_path, false);
                 Some((
                     rank,
+                    quality,
                     label.clone(),
                     CompletionItem {
                         label: label.clone(),
@@ -418,11 +453,15 @@ fn provide_link_completions(
         })
         .collect();
 
-    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    candidates.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
     if candidates.len() > 200 {
         candidates.truncate(200);
     }
-    candidates.into_iter().map(|(_, _, item)| item).collect()
+    candidates.into_iter().map(|(_, _, _, item)| item).collect()
 }
 
 /// Compute a relative path from `source` to `target`, where both are
@@ -475,6 +514,27 @@ fn rank_match(prefix: &str, label: &str, stem: &str, rel_path: &str) -> usize {
     4
 }
 
+fn completion_quality(rel_path: &str, has_display_name: bool) -> usize {
+    let mut penalty = 0usize;
+    if !has_display_name {
+        penalty += 15;
+    }
+
+    let depth = rel_path.split('/').count().saturating_sub(1);
+    penalty += depth.min(15);
+
+    for segment in rel_path.split('/') {
+        if segment.starts_with('.') {
+            penalty += 40;
+        }
+        if segment.eq_ignore_ascii_case("node_modules") {
+            penalty += 80;
+        }
+    }
+
+    penalty
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +566,21 @@ mod tests {
         assert!(is_field_name_position("status: open", 3));
         assert!(is_field_name_position("status", 6));
         assert!(!is_field_name_position("status: open", 10));
+    }
+
+    #[test]
+    fn completion_quality_prefers_display_names() {
+        assert!(
+            completion_quality("people/alice.md", true)
+                < completion_quality("people/alice.md", false)
+        );
+    }
+
+    #[test]
+    fn completion_quality_penalizes_hidden_vendor_paths() {
+        assert!(
+            completion_quality("241029jvb.md", true)
+                < completion_quality(".obsidian/plugins/example/node_modules/README.md", false)
+        );
     }
 }
