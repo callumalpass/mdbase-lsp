@@ -146,19 +146,26 @@ fn build_link_hover(
 
         let resolved = ctx.collection.root.join(&target_rel);
         if let Some(target_text) = read_target_text(state, &resolved) {
-            let parsed = text::parse_frontmatter(&target_text);
-            if !parsed.parse_error && !parsed.mapping_error {
-                let types = ctx
-                    .collection
-                    .determine_types_for_path(&parsed.json, Some(&target_rel));
-                if let Some((key, value)) =
-                    display_name_for_types(&ctx.collection, &types, &parsed.json)
-                {
-                    contents.push_str(&format!("\n\nDisplay name (`{}`): {}", key, value));
-                }
-                if !types.is_empty() {
-                    contents.push_str(&format!("\n\nTypes: {}", types.join(", ")));
-                }
+            let (effective_frontmatter, types) = effective_frontmatter_and_types(ctx, &target_rel)
+                .unwrap_or_else(|| {
+                    let parsed = text::parse_frontmatter(&target_text);
+                    if parsed.parse_error || parsed.mapping_error {
+                        (serde_json::json!({}), Vec::new())
+                    } else {
+                        let types = ctx
+                            .collection
+                            .determine_types_for_path(&parsed.json, Some(&target_rel));
+                        (parsed.json, types)
+                    }
+                });
+
+            if let Some((key, value)) =
+                display_name_for_types(&ctx.collection, &types, &effective_frontmatter)
+            {
+                contents.push_str(&format!("\n\nDisplay name (`{}`): {}", key, value));
+            }
+            if !types.is_empty() {
+                contents.push_str(&format!("\n\nTypes: {}", types.join(", ")));
             }
 
             if let Some(anchor) = anchor {
@@ -189,6 +196,31 @@ fn build_link_hover(
         }),
         range,
     })
+}
+
+fn effective_frontmatter_and_types(
+    ctx: &CollectionContext,
+    target_rel: &str,
+) -> Option<(serde_json::Value, Vec<String>)> {
+    let result = ctx
+        .collection
+        .read(&serde_json::json!({ "path": target_rel }));
+    if result.get("error").is_some() {
+        return None;
+    }
+
+    let frontmatter = result.get("frontmatter")?.clone();
+    let types = result
+        .get("types")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some((frontmatter, types))
 }
 
 fn display_name_for_types(
