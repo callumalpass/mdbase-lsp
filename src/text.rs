@@ -3,7 +3,6 @@ use mdbase::frontmatter::parser::{is_parse_error, parse_document, yaml_mapping_t
 #[derive(Clone)]
 pub(crate) struct ParsedFrontmatter {
     pub json: serde_json::Value,
-    pub has_frontmatter: bool,
     pub parse_error: bool,
     pub mapping_error: bool,
 }
@@ -14,7 +13,6 @@ pub(crate) fn parse_frontmatter(text: &str) -> ParsedFrontmatter {
         if is_parse_error(fm) {
             return ParsedFrontmatter {
                 json: serde_json::json!({}),
-                has_frontmatter: doc.has_frontmatter,
                 parse_error: true,
                 mapping_error: false,
             };
@@ -24,19 +22,16 @@ pub(crate) fn parse_frontmatter(text: &str) -> ParsedFrontmatter {
     match &doc.frontmatter {
         Some(serde_yaml::Value::Mapping(m)) => ParsedFrontmatter {
             json: yaml_mapping_to_json(m),
-            has_frontmatter: doc.has_frontmatter,
             parse_error: false,
             mapping_error: false,
         },
         Some(serde_yaml::Value::Null) | None => ParsedFrontmatter {
             json: serde_json::json!({}),
-            has_frontmatter: doc.has_frontmatter,
             parse_error: false,
             mapping_error: false,
         },
         Some(_) => ParsedFrontmatter {
             json: serde_json::json!({}),
-            has_frontmatter: doc.has_frontmatter,
             parse_error: false,
             mapping_error: true,
         },
@@ -98,8 +93,8 @@ pub(crate) fn find_field_range(
                 continue;
             }
             let trimmed = line.trim_start();
-            if trimmed.starts_with(field) {
-                let after = trimmed[field.len()..].trim_start();
+            if let Some(stripped) = trimmed.strip_prefix(field) {
+                let after = stripped.trim_start();
                 if after.starts_with(':') {
                     let prefix_len = line.len() - trimmed.len();
                     let start_col = prefix_len;
@@ -152,8 +147,6 @@ fn is_word_char(b: u8) -> bool {
 #[derive(Debug, Clone)]
 pub(crate) struct LinkAtCursor {
     pub target: String,
-    pub start_col: usize,
-    pub end_col: usize,
 }
 
 /// Scan `line_idx` of `text` for a link that spans `column`.
@@ -190,8 +183,6 @@ pub(crate) fn link_at_position(text: &str, line_idx: usize, column: usize) -> Op
                     if !target.is_empty() {
                         return Some(LinkAtCursor {
                             target: target.to_string(),
-                            start_col: link_start,
-                            end_col: link_end,
                         });
                     }
                 }
@@ -244,11 +235,7 @@ pub(crate) fn link_at_position(text: &str, line_idx: usize, column: usize) -> Op
                     {
                         let target = path.split('#').next().unwrap_or(path).to_string();
                         if !target.is_empty() {
-                            return Some(LinkAtCursor {
-                                target,
-                                start_col: link_start,
-                                end_col: link_end,
-                            });
+                            return Some(LinkAtCursor { target });
                         }
                     }
                 }
@@ -273,33 +260,53 @@ pub(crate) fn link_at_position(text: &str, line_idx: usize, column: usize) -> Op
 /// - `field: value` → returns `"value"` (trimmed) when cursor is past `:`
 /// - `  - value`    → returns `"value"` (trimmed) when cursor is past `-`
 pub(crate) fn value_from_frontmatter_line(line: &str, column: usize) -> Option<String> {
+    frontmatter_value_at_column(line, column).map(|v| v.value)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FrontmatterValueAt {
+    pub value: String,
+    pub start_col: usize,
+    pub end_col: usize,
+}
+
+pub(crate) fn frontmatter_value_at_column(line: &str, column: usize) -> Option<FrontmatterValueAt> {
     let trimmed = line.trim_start();
     let leading = line.len() - trimmed.len();
+    let line_end = line.trim_end().len();
 
     // `field: value` form
     if let Some(colon_idx) = trimmed.find(':') {
         let abs_colon = leading + colon_idx;
         if column > abs_colon {
-            let value = trimmed[colon_idx + 1..].trim();
+            let raw = &trimmed[colon_idx + 1..];
+            let value = raw.trim();
             if !value.is_empty() {
-                return Some(value.to_string());
+                let ws = raw.len() - raw.trim_start().len();
+                return Some(FrontmatterValueAt {
+                    value: value.to_string(),
+                    start_col: leading + colon_idx + 1 + ws,
+                    end_col: line_end,
+                });
             }
         }
         return None;
     }
 
     // `  - value` form (list item)
-    if trimmed.starts_with('-') {
-        let after_dash = &trimmed[1..];
+    if let Some(after_dash) = trimmed.strip_prefix('-') {
         let dash_abs = leading; // position of the dash
-        let value_start = dash_abs + 1 + (after_dash.len() - after_dash.trim_start().len());
         if column > dash_abs {
             let value = after_dash.trim();
             if !value.is_empty() {
-                return Some(value.to_string());
+                let ws = after_dash.len() - after_dash.trim_start().len();
+                return Some(FrontmatterValueAt {
+                    value: value.to_string(),
+                    start_col: dash_abs + 1 + ws,
+                    end_col: line_end,
+                });
             }
         }
-        let _ = value_start; // suppress unused warning
         return None;
     }
 
@@ -413,4 +420,27 @@ pub(crate) fn field_name_for_position(text: &str, line_idx: usize) -> Option<Str
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frontmatter_value_at_column_field_form_tracks_range() {
+        let line = "owner: [[notes/alice|Alice]]";
+        let value = frontmatter_value_at_column(line, line.len()).unwrap();
+        assert_eq!(value.value, "[[notes/alice|Alice]]");
+        assert_eq!(value.start_col, 7);
+        assert_eq!(value.end_col, line.len());
+    }
+
+    #[test]
+    fn frontmatter_value_at_column_list_form_tracks_range() {
+        let line = "  - ../notes/alice.md";
+        let value = frontmatter_value_at_column(line, line.len()).unwrap();
+        assert_eq!(value.value, "../notes/alice.md");
+        assert_eq!(value.start_col, 4);
+        assert_eq!(value.end_col, line.len());
+    }
 }

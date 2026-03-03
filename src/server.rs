@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -25,24 +26,23 @@ impl MdbaseLanguageServer {
 #[tower_lsp::async_trait]
 impl LanguageServer for MdbaseLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        // Determine collection root from workspace folders
+        let mut roots = Vec::new();
         if let Some(folders) = &params.workspace_folders {
-            if let Some(folder) = folders.first() {
+            for folder in folders {
                 if let Ok(path) = folder.uri.to_file_path() {
-                    info!(root = %path.display(), "collection root from workspace folder");
-                    let mut root = self.state.collection_root.write().unwrap();
-                    *root = Some(path);
+                    info!(root = %path.display(), "workspace folder");
+                    roots.push(path);
                 }
             }
         } else if let Some(root_uri) = &params.root_uri {
             if let Ok(path) = root_uri.to_file_path() {
                 info!(root = %path.display(), "collection root from root_uri");
-                let mut root = self.state.collection_root.write().unwrap();
-                *root = Some(path);
+                roots.push(path);
             }
         } else {
             warn!("no workspace folder or root_uri provided");
         }
+        self.state.set_workspace_roots(roots);
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -86,6 +86,13 @@ impl LanguageServer for MdbaseLanguageServer {
                     ],
                     ..Default::default()
                 }),
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(OneOf::Left(true)),
+                    }),
+                    file_operations: None,
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -97,13 +104,17 @@ impl LanguageServer for MdbaseLanguageServer {
             .log_message(MessageType::INFO, "mdbase LSP initialized")
             .await;
 
-        // Build the file index in the background
-        let state = Arc::clone(&self.state);
-        tokio::task::spawn_blocking(move || {
-            if let Some(collection) = state.get_collection() {
-                state.file_index.rebuild(&collection);
-            }
-        });
+        // Preload contexts/indexes for configured workspace roots.
+        for root in self.state.workspace_roots_snapshot() {
+            let state = Arc::clone(&self.state);
+            tokio::task::spawn_blocking(move || {
+                let _ = state.context_for_root(&root);
+            });
+        }
+
+        if let Err(err) = register_file_watchers(&self.client).await {
+            warn!(error = %err, "failed to register didChangeWatchedFiles");
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -117,36 +128,34 @@ impl LanguageServer for MdbaseLanguageServer {
             uri.clone(),
             DocumentState::new(ropey::Rope::from_str(&text)),
         );
-        if let Some(collection) = self.state.get_collection() {
-            if let Some(rel_path) = crate::collection_utils::rel_path_from_uri(&collection, &uri) {
-                if crate::collection_utils::should_index_rel_path(&collection, &rel_path) {
-                    self.state
-                        .file_index
-                        .upsert_from_text(&collection, rel_path, &text);
-                } else {
-                    self.state.file_index.remove_path(&rel_path);
-                }
-            }
-        }
+        upsert_or_remove_index_entry(&self.state, &uri, &text);
         // Immediate diagnostics on open
         crate::diagnostics::publish(&self.client, &self.state, &uri).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
+        let mut latest_text: Option<String> = None;
         // Apply incremental changes to the rope
-        if let Some(mut doc) = self.state.documents.get_mut(&uri) {
-            for change in params.content_changes {
-                if let Some(range) = change.range {
-                    let start = offset_from_position(&doc.rope, range.start);
-                    let end = offset_from_position(&doc.rope, range.end);
-                    doc.rope.remove(start..end);
-                    doc.rope.insert(start, &change.text);
-                } else {
-                    doc.rope = ropey::Rope::from_str(&change.text);
+        {
+            if let Some(mut doc) = self.state.documents.get_mut(&uri) {
+                for change in params.content_changes {
+                    if let Some(range) = change.range {
+                        let start = offset_from_position(&doc.rope, range.start);
+                        let end = offset_from_position(&doc.rope, range.end);
+                        doc.rope.remove(start..end);
+                        doc.rope.insert(start, &change.text);
+                    } else {
+                        doc.rope = ropey::Rope::from_str(&change.text);
+                    }
                 }
+                doc.invalidate_frontmatter();
+                latest_text = Some(doc.rope.to_string());
             }
-            doc.invalidate_frontmatter();
+        }
+
+        if let Some(text) = latest_text.as_deref() {
+            upsert_or_remove_index_entry(&self.state, &uri, text);
         }
 
         // Debounced diagnostics: bump generation, spawn delayed task
@@ -165,22 +174,17 @@ impl LanguageServer for MdbaseLanguageServer {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = &params.text_document.uri;
-        if let Some(collection) = self.state.get_collection() {
-            if let Some(rel_path) = crate::collection_utils::rel_path_from_uri(&collection, uri) {
-                if crate::collection_utils::should_index_rel_path(&collection, &rel_path) {
-                    let abs_path = collection.root.join(&rel_path);
-                    if let Ok(on_disk_text) = std::fs::read_to_string(&abs_path) {
-                        self.state.file_index.upsert_from_text(
-                            &collection,
-                            rel_path,
-                            &on_disk_text,
-                        );
-                    } else {
-                        self.state.file_index.remove_path(&rel_path);
-                    }
+        if let Some((ctx, rel_path)) = self.state.context_and_rel_path_for_uri(uri) {
+            if crate::collection_utils::should_index_rel_path(&ctx.collection, &rel_path) {
+                let abs_path = ctx.collection.root.join(&rel_path);
+                if let Ok(on_disk_text) = std::fs::read_to_string(&abs_path) {
+                    ctx.file_index
+                        .upsert_from_text(&ctx.collection, rel_path, &on_disk_text);
                 } else {
-                    self.state.file_index.remove_path(&rel_path);
+                    ctx.file_index.remove_path(&rel_path);
                 }
+            } else {
+                ctx.file_index.remove_path(&rel_path);
             }
         }
         self.state.documents.remove(uri);
@@ -196,7 +200,7 @@ impl LanguageServer for MdbaseLanguageServer {
             return Ok(None);
         }
 
-        let Some(collection) = self.state.get_collection() else {
+        let Some((ctx, rel_path)) = self.state.context_and_rel_path_for_uri(uri) else {
             return Ok(None);
         };
         let Some(text) = self.state.document_text(uri) else {
@@ -208,17 +212,14 @@ impl LanguageServer for MdbaseLanguageServer {
             return Ok(None);
         }
 
-        let rel_path = uri.to_file_path().ok().and_then(|p: std::path::PathBuf| {
-            p.strip_prefix(&collection.root)
-                .ok()
-                .map(|r: &std::path::Path| r.to_string_lossy().to_string().replace('\\', "/"))
-        });
-        let type_names = collection.determine_types_for_path(&parsed.json, rel_path.as_deref());
+        let type_names = ctx
+            .collection
+            .determine_types_for_path(&parsed.json, Some(&rel_path));
 
         // Collect unique NowOnWrite field names across all matched types
         let mut now_fields = Vec::new();
         for type_name in &type_names {
-            if let Some(type_def) = collection.types.get(type_name) {
+            if let Some(type_def) = ctx.collection.types.get(type_name) {
                 for (field_name, field_def) in &type_def.fields {
                     if matches!(
                         field_def.generated,
@@ -267,7 +268,7 @@ impl LanguageServer for MdbaseLanguageServer {
         // Reload collection when a type definition changes.
         if uri.path().contains("/_types/") {
             info!("type file changed, reloading collection");
-            self.state.invalidate_collection();
+            self.state.invalidate_for_uri(&uri);
         }
 
         // Cancel any pending debounced diagnostics from did_change
@@ -277,18 +278,99 @@ impl LanguageServer for MdbaseLanguageServer {
         crate::diagnostics::publish(&self.client, &self.state, &uri).await;
 
         // Incrementally update file index for this saved file.
-        if let Some(collection) = self.state.get_collection() {
-            if let Some(rel_path) = crate::collection_utils::rel_path_from_uri(&collection, &uri) {
-                if crate::collection_utils::should_index_rel_path(&collection, &rel_path) {
-                    if let Some(text) = self.state.document_text(&uri) {
-                        self.state
-                            .file_index
-                            .upsert_from_text(&collection, rel_path, &text);
-                    }
-                } else {
-                    self.state.file_index.remove_path(&rel_path);
+        if let Some(text) = self.state.document_text(&uri) {
+            upsert_or_remove_index_entry(&self.state, &uri, &text);
+        }
+    }
+
+    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        let mut roots = self.state.workspace_roots_snapshot();
+
+        for removed in &params.event.removed {
+            if let Ok(path) = removed.uri.to_file_path() {
+                roots.retain(|r| r != &path);
+                self.state.invalidate_root(&path);
+            }
+        }
+
+        for added in &params.event.added {
+            if let Ok(path) = added.uri.to_file_path() {
+                if !roots.contains(&path) {
+                    roots.push(path.clone());
                 }
             }
+        }
+
+        self.state.set_workspace_roots(roots.clone());
+        for root in roots {
+            let state = Arc::clone(&self.state);
+            tokio::task::spawn_blocking(move || {
+                let _ = state.context_for_root(&root);
+            });
+        }
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let mut roots_to_invalidate = HashSet::new();
+
+        for change in params.changes {
+            let Ok(path) = change.uri.to_file_path() else {
+                continue;
+            };
+
+            let is_config = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("mdbase.yaml"))
+                .unwrap_or(false);
+            let is_type_file = path_has_component(&path, "_types");
+
+            if is_config {
+                if let Some(parent) = path.parent() {
+                    roots_to_invalidate.insert(parent.to_path_buf());
+                }
+                continue;
+            }
+            if is_type_file {
+                if let Some(root) = self.state.root_for_path(&path) {
+                    roots_to_invalidate.insert(root);
+                }
+                continue;
+            }
+
+            let Ok(uri) = Url::from_file_path(&path) else {
+                continue;
+            };
+
+            let Some((ctx, rel_path)) = self.state.context_and_rel_path_for_uri(&uri) else {
+                continue;
+            };
+
+            if !crate::collection_utils::should_index_rel_path(&ctx.collection, &rel_path) {
+                ctx.file_index.remove_path(&rel_path);
+                continue;
+            }
+
+            match change.typ {
+                FileChangeType::DELETED => {
+                    ctx.file_index.remove_path(&rel_path);
+                }
+                FileChangeType::CHANGED | FileChangeType::CREATED => {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        ctx.file_index
+                            .upsert_from_text(&ctx.collection, rel_path, &text);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for root in roots_to_invalidate {
+            self.state.invalidate_root(&root);
+            let state = Arc::clone(&self.state);
+            tokio::task::spawn_blocking(move || {
+                let _ = state.context_for_root(&root);
+            });
         }
     }
 
@@ -353,6 +435,54 @@ impl LanguageServer for MdbaseLanguageServer {
     ) -> Result<Option<serde_json::Value>> {
         crate::commands::execute(&self.client, &self.state, &params).await
     }
+}
+
+async fn register_file_watchers(client: &Client) -> Result<()> {
+    let options = DidChangeWatchedFilesRegistrationOptions {
+        watchers: vec![
+            FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/mdbase.yaml".to_string()),
+                kind: None,
+            },
+            FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/_types/**/*".to_string()),
+                kind: None,
+            },
+            FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/*.md".to_string()),
+                kind: None,
+            },
+        ],
+    };
+
+    client
+        .register_capability(vec![Registration {
+            id: "mdbase-watchers".to_string(),
+            method: "workspace/didChangeWatchedFiles".to_string(),
+            register_options: Some(serde_json::to_value(options).unwrap_or_default()),
+        }])
+        .await
+}
+
+fn upsert_or_remove_index_entry(state: &BackendState, uri: &Url, text: &str) {
+    let Some((ctx, rel_path)) = state.context_and_rel_path_for_uri(uri) else {
+        return;
+    };
+    if crate::collection_utils::should_index_rel_path(&ctx.collection, &rel_path) {
+        ctx.file_index
+            .upsert_from_text(&ctx.collection, rel_path, text);
+    } else {
+        ctx.file_index.remove_path(&rel_path);
+    }
+}
+
+fn path_has_component(path: &std::path::Path, component: &str) -> bool {
+    path.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .map(|s| s.eq_ignore_ascii_case(component))
+            .unwrap_or(false)
+    })
 }
 
 /// Convert an LSP `Position` (UTF-16 columns) to a rope char offset.

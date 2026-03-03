@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::RwLock;
 
 use mdbase::Collection;
@@ -18,13 +20,13 @@ pub(crate) struct FileEntry {
 }
 
 pub(crate) struct FileIndex {
-    entries: RwLock<Vec<FileEntry>>,
+    data: RwLock<IndexData>,
 }
 
 impl FileIndex {
     pub fn new() -> Self {
         Self {
-            entries: RwLock::new(Vec::new()),
+            data: RwLock::new(IndexData::default()),
         }
     }
 
@@ -54,37 +56,49 @@ impl FileIndex {
             }
         }
 
-        debug!(count = entries.len(), "file_index: rebuilt");
-        *self.entries.write().unwrap() = entries;
+        entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+
+        let mut data = IndexData {
+            entries,
+            ..Default::default()
+        };
+        data.reindex();
+        debug!(count = data.entries.len(), "file_index: rebuilt");
+        *self.data.write().unwrap() = data;
     }
 
     /// Upsert a single file entry from in-memory text.
     pub fn upsert_from_text(&self, collection: &Collection, rel_path: String, text: &str) {
         let parsed = text::parse_frontmatter(text);
         if parsed.parse_error || parsed.mapping_error {
+            self.remove_path(&rel_path);
             return;
         }
         let Some(entry) = build_entry(collection, rel_path.clone(), text, &parsed.json) else {
+            self.remove_path(&rel_path);
             return;
         };
-        let mut entries = self.entries.write().unwrap();
-        if let Some(existing) = entries.iter_mut().find(|e| e.rel_path == rel_path) {
+        let mut data = self.data.write().unwrap();
+        if let Some(existing) = data.entries.iter_mut().find(|e| e.rel_path == rel_path) {
             *existing = entry;
         } else {
-            entries.push(entry);
+            data.entries.push(entry);
         }
+        data.entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        data.reindex();
     }
 
     /// Remove a file entry by its collection-relative path.
     pub fn remove_path(&self, rel_path: &str) {
-        let mut entries = self.entries.write().unwrap();
-        entries.retain(|e| e.rel_path != rel_path);
+        let mut data = self.data.write().unwrap();
+        data.entries.retain(|e| e.rel_path != rel_path);
+        data.reindex();
     }
 
     /// Return rel_paths that match `target_type` (or all files if None).
     pub fn link_targets(&self, target_type: Option<&str>) -> Vec<String> {
-        let entries = self.entries.read().unwrap();
-        entries
+        let data = self.data.read().unwrap();
+        data.entries
             .iter()
             .filter(|e| match target_type {
                 Some(tt) => e.types.iter().any(|t| t.eq_ignore_ascii_case(tt)),
@@ -99,8 +113,8 @@ impl FileIndex {
         &self,
         target_type: Option<&str>,
     ) -> Vec<(String, Option<String>, Option<String>)> {
-        let entries = self.entries.read().unwrap();
-        entries
+        let data = self.data.read().unwrap();
+        data.entries
             .iter()
             .filter(|e| match target_type {
                 Some(tt) => e.types.iter().any(|t| t.eq_ignore_ascii_case(tt)),
@@ -117,13 +131,23 @@ impl FileIndex {
     }
 
     pub fn all_entries(&self) -> Vec<FileEntry> {
-        self.entries.read().unwrap().clone()
+        self.data.read().unwrap().entries.clone()
+    }
+
+    pub fn all_rel_paths(&self) -> Vec<String> {
+        self.data
+            .read()
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| e.rel_path.clone())
+            .collect()
     }
 
     pub fn tag_counts(&self) -> Vec<(String, usize)> {
-        let entries = self.entries.read().unwrap();
+        let data = self.data.read().unwrap();
         let mut counts = std::collections::HashMap::<String, usize>::new();
-        for entry in entries.iter() {
+        for entry in data.entries.iter() {
             for tag in &entry.tags {
                 *counts.entry(tag.clone()).or_default() += 1;
             }
@@ -131,6 +155,102 @@ impl FileIndex {
         let mut result: Vec<(String, usize)> = counts.into_iter().collect();
         result.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         result
+    }
+
+    /// Resolve a user-entered link target to a collection-relative file path.
+    pub fn resolve_target_rel_path(
+        &self,
+        collection: &Collection,
+        target: &str,
+        source_rel_path: Option<&str>,
+    ) -> Option<String> {
+        let target = normalize_target(target)?;
+        let resolved = resolve_relative_target(&target, source_rel_path);
+
+        let data = self.data.read().unwrap();
+        if let Some(found) = lookup_exact(&data, &resolved) {
+            return Some(found);
+        }
+
+        // Extension inference.
+        if !resolved.contains('.')
+            || (!resolved.ends_with(".md") && !has_known_extension(collection, &resolved))
+        {
+            let with_md = format!("{}.md", resolved);
+            if let Some(found) = lookup_exact(&data, &with_md) {
+                return Some(found);
+            }
+            for ext in &collection.settings.extensions {
+                let with_ext = format!("{}.{}", resolved, ext);
+                if let Some(found) = lookup_exact(&data, &with_ext) {
+                    return Some(found);
+                }
+            }
+        }
+
+        // Stem fallback for simple names.
+        if !resolved.contains('/') {
+            let key = resolved.to_lowercase();
+            if let Some(indices) = data.by_stem_lower.get(&key) {
+                if indices.is_empty() {
+                    return None;
+                }
+                // Prefer exact-case stem match, then first indexed candidate.
+                if let Some(idx) = indices.iter().copied().find(|idx| {
+                    let stem = Path::new(&data.entries[*idx].rel_path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    stem == resolved
+                }) {
+                    return Some(data.entries[idx].rel_path.clone());
+                }
+                let first = indices[0];
+                return Some(data.entries[first].rel_path.clone());
+            }
+        }
+
+        None
+    }
+
+    pub fn resolve_target_abs_path(
+        &self,
+        collection: &Collection,
+        target: &str,
+        source_rel_path: Option<&str>,
+    ) -> Option<std::path::PathBuf> {
+        self.resolve_target_rel_path(collection, target, source_rel_path)
+            .map(|rel| collection.root.join(rel))
+    }
+}
+
+#[derive(Default)]
+struct IndexData {
+    entries: Vec<FileEntry>,
+    by_rel_path: HashMap<String, usize>,
+    by_rel_path_lower: HashMap<String, usize>,
+    by_stem_lower: HashMap<String, Vec<usize>>,
+}
+
+impl IndexData {
+    fn reindex(&mut self) {
+        self.by_rel_path.clear();
+        self.by_rel_path_lower.clear();
+        self.by_stem_lower.clear();
+
+        for (idx, entry) in self.entries.iter().enumerate() {
+            self.by_rel_path.insert(entry.rel_path.clone(), idx);
+            self.by_rel_path_lower
+                .entry(entry.rel_path.to_lowercase())
+                .or_insert(idx);
+
+            let stem = Path::new(&entry.rel_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            self.by_stem_lower.entry(stem).or_default().push(idx);
+        }
     }
 }
 
@@ -203,5 +323,91 @@ fn json_string(frontmatter: &serde_json::Value, key: &str) -> Option<String> {
         None
     } else {
         Some(value.to_string())
+    }
+}
+
+fn lookup_exact(data: &IndexData, rel_path: &str) -> Option<String> {
+    if let Some(idx) = data.by_rel_path.get(rel_path).copied() {
+        return Some(data.entries[idx].rel_path.clone());
+    }
+    data.by_rel_path_lower
+        .get(&rel_path.to_lowercase())
+        .copied()
+        .map(|idx| data.entries[idx].rel_path.clone())
+}
+
+fn has_known_extension(collection: &Collection, path: &str) -> bool {
+    if path.ends_with(".md") {
+        return true;
+    }
+    for ext in &collection.settings.extensions {
+        if path.ends_with(&format!(".{}", ext)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn resolve_relative_target(target: &str, source_rel_path: Option<&str>) -> String {
+    if target.starts_with("./") || target.starts_with("../") {
+        let source_dir = source_rel_path
+            .and_then(|s| Path::new(s).parent())
+            .unwrap_or(Path::new(""));
+        let joined = source_dir.join(target);
+        return normalize_path_segments(&joined.to_string_lossy().replace('\\', "/"));
+    }
+    if let Some(stripped) = target.strip_prefix('/') {
+        return stripped.to_string();
+    }
+    target.to_string()
+}
+
+fn normalize_target(target: &str) -> Option<String> {
+    let target = if target.starts_with("[[") && target.ends_with("]]") {
+        let inner = &target[2..target.len() - 2];
+        inner
+            .split('|')
+            .next()
+            .unwrap_or(inner)
+            .split('#')
+            .next()
+            .unwrap_or(inner)
+            .trim()
+            .to_string()
+    } else {
+        target
+            .split('#')
+            .next()
+            .unwrap_or(target)
+            .trim()
+            .to_string()
+    };
+
+    if target.is_empty() {
+        None
+    } else {
+        Some(target)
+    }
+}
+
+fn normalize_path_segments(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                if parts.is_empty() || parts.last() == Some(&"..") {
+                    parts.push("..");
+                } else {
+                    parts.pop();
+                }
+            }
+            s => parts.push(s),
+        }
+    }
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
     }
 }

@@ -38,13 +38,13 @@ async fn type_info(
     state: &BackendState,
     args: &[serde_json::Value],
 ) -> Result<Option<serde_json::Value>> {
-    let collection = match state.get_collection() {
+    let collection = match default_collection(state) {
         Some(c) => c,
         None => return Ok(None),
     };
 
     let input = args
-        .get(0)
+        .first()
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
     let type_name = match input.get("type").and_then(|v| v.as_str()) {
@@ -89,7 +89,7 @@ async fn create_file(
     state: &BackendState,
     args: &[serde_json::Value],
 ) -> Result<Option<serde_json::Value>> {
-    let collection = match state.get_collection() {
+    let collection = match default_collection(state) {
         Some(c) => c,
         None => {
             client
@@ -100,7 +100,7 @@ async fn create_file(
     };
 
     let mut input = args
-        .get(0)
+        .first()
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
 
@@ -118,7 +118,7 @@ async fn create_file(
             // Walk the extends chain so that overridden fields (e.g. person
             // redefining zettelid without `generated`) still pick up the
             // ancestor's strategy.
-            for (field_name, _) in &type_def.fields {
+            for field_name in type_def.fields.keys() {
                 if fm_obj.contains_key(field_name) {
                     continue;
                 }
@@ -141,7 +141,7 @@ async fn create_file(
             let has_path = input
                 .get("path")
                 .and_then(|v| v.as_str())
-                .map_or(false, |s| !s.is_empty());
+                .is_some_and(|s| !s.is_empty());
             if !has_path {
                 if let Some(pattern) = find_filename_pattern(&collection, &tn_lower) {
                     if let Some(path) = derive_path_from_pattern(&pattern, &fm_obj) {
@@ -279,7 +279,7 @@ fn strip_frontmatter_field(path: &std::path::Path, key: &str) {
         Err(_) => return,
     };
     let lines: Vec<&str> = content.lines().collect();
-    if lines.first().map_or(true, |l| l.trim() != "---") {
+    if lines.first().is_none_or(|l| l.trim() != "---") {
         return;
     }
     let fm_end = match lines[1..].iter().position(|l| l.trim() == "---") {
@@ -324,9 +324,17 @@ async fn query_collection(
     args: &[serde_json::Value],
 ) -> Result<Option<serde_json::Value>> {
     let query = args
-        .get(0)
+        .first()
         .and_then(|v| v.get("query"))
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     Ok(Some(crate::symbols::query_collection(state, query)))
+}
+
+fn default_collection(state: &BackendState) -> Option<std::sync::Arc<Collection>> {
+    state
+        .all_contexts()
+        .into_iter()
+        .next()
+        .map(|ctx| ctx.collection.clone())
 }

@@ -1,5 +1,6 @@
 use tower_lsp::lsp_types::*;
 
+use crate::collection_utils;
 use crate::state::BackendState;
 use crate::text;
 
@@ -10,7 +11,8 @@ use crate::text;
 /// - Link hover: show target file's frontmatter preview
 /// - Type name hover: show type definition summary
 pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Hover> {
-    let collection = state.get_collection()?;
+    let (ctx, source_rel_path) = state.context_and_rel_path_for_uri(uri)?;
+    let collection = &ctx.collection;
     let text = state.document_text(uri)?;
     let line_idx = position.line as usize;
     let line_text = text.lines().nth(line_idx).unwrap_or("").to_string();
@@ -25,18 +27,12 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Ho
         if parsed.parse_error || parsed.mapping_error {
             return None;
         }
-        let rel_path = uri.to_file_path().ok().and_then(|p| {
-            p.strip_prefix(&collection.root)
-                .ok()
-                .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
-        });
-        let type_names = collection.determine_types_for_path(&parsed.json, rel_path.as_deref());
+        let type_names = collection.determine_types_for_path(&parsed.json, Some(&source_rel_path));
 
         if let Some(field_name) = text::field_name_from_line(&line_text) {
             let colon_idx = line_text.find(':').unwrap_or(0);
             if column <= colon_idx {
-                if let Some(field_def) = field_def_for_types(&collection, &type_names, &field_name)
-                {
+                if let Some(field_def) = field_def_for_types(collection, &type_names, &field_name) {
                     let mut contents = String::new();
                     contents.push_str(&format!("**{}**: `{}`", field_name, field_def.field_type));
                     if field_def.required {
@@ -84,48 +80,53 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Ho
                     }
                 }
 
-                if let Some(field_def) = field_def_for_types(&collection, &type_names, &field_name)
-                {
+                if let Some(field_def) = field_def_for_types(collection, &type_names, &field_name) {
                     if is_link_field(&field_def) {
-                        if let Some(rel_path) = rel_path {
-                            let resolved = collection.resolve_link(&serde_json::json!({
-                                "path": rel_path,
-                                "field": field_name,
-                            }));
-                            if let Some(target) =
-                                resolved.get("resolved_path").and_then(|v| v.as_str())
-                            {
-                                let read = collection.read(&serde_json::json!({"path": target}));
-                                let title = read
-                                    .get("frontmatter")
-                                    .and_then(|fm| fm.get("title"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let types = read
-                                    .get("types")
-                                    .and_then(|v| v.as_array())
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|t| t.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    })
-                                    .unwrap_or_default();
-                                let mut contents = String::new();
-                                contents.push_str(&format!("**Target** `{}`", target));
-                                if !title.is_empty() {
-                                    contents.push_str(&format!("\n\nTitle: {}", title));
+                        if let Some(value) = text::value_from_frontmatter_line(&line_text, column) {
+                            let target =
+                                collection_utils::parse_link_value(&value).unwrap_or(value);
+                            if let Some(resolved) = ctx.file_index.resolve_target_abs_path(
+                                &ctx.collection,
+                                &target,
+                                Some(&source_rel_path),
+                            ) {
+                                if let Some(target_rel) = resolved
+                                    .strip_prefix(&collection.root)
+                                    .ok()
+                                    .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
+                                {
+                                    let mut contents = format!("**Target** `{}`", target_rel);
+                                    if let Some(target_text) = read_target_text(state, &resolved) {
+                                        let parsed = text::parse_frontmatter(&target_text);
+                                        if !parsed.parse_error && !parsed.mapping_error {
+                                            if let Some(title) =
+                                                parsed.json.get("title").and_then(|v| v.as_str())
+                                            {
+                                                if !title.is_empty() {
+                                                    contents
+                                                        .push_str(&format!("\n\nTitle: {}", title));
+                                                }
+                                            }
+                                            let types = collection.determine_types_for_path(
+                                                &parsed.json,
+                                                Some(&target_rel),
+                                            );
+                                            if !types.is_empty() {
+                                                contents.push_str(&format!(
+                                                    "\n\nTypes: {}",
+                                                    types.join(", ")
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    return Some(Hover {
+                                        contents: HoverContents::Markup(MarkupContent {
+                                            kind: MarkupKind::Markdown,
+                                            value: contents,
+                                        }),
+                                        range: None,
+                                    });
                                 }
-                                if !types.is_empty() {
-                                    contents.push_str(&format!("\n\nTypes: {}", types));
-                                }
-                                return Some(Hover {
-                                    contents: HoverContents::Markup(MarkupContent {
-                                        kind: MarkupKind::Markdown,
-                                        value: contents,
-                                    }),
-                                    range: None,
-                                });
                             }
                         }
                     }
@@ -134,15 +135,10 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Ho
         }
     } else if let Some(link) = crate::body_links::body_link_at(&text, line_idx, column) {
         // Body link hover — show target path, title, and types
-        let rel_path = uri.to_file_path().ok().and_then(|p| {
-            p.strip_prefix(&collection.root)
-                .ok()
-                .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
-        });
-        if let Some(resolved) = crate::collection_utils::resolve_link_target(
-            &collection,
+        if let Some(resolved) = ctx.file_index.resolve_target_abs_path(
+            &ctx.collection,
             &link.target,
-            rel_path.as_deref(),
+            Some(&source_rel_path),
         ) {
             if let Some(target_rel) = resolved
                 .strip_prefix(&collection.root)
@@ -150,8 +146,7 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Ho
                 .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
             {
                 let mut contents = format!("**Target** `{}`", target_rel);
-                // Try to read frontmatter from the target file for title/types
-                if let Ok(target_text) = std::fs::read_to_string(&resolved) {
+                if let Some(target_text) = read_target_text(state, &resolved) {
                     let parsed = text::parse_frontmatter(&target_text);
                     if !parsed.parse_error && !parsed.mapping_error {
                         if let Some(title) = parsed.json.get("title").and_then(|v| v.as_str()) {
@@ -232,4 +227,13 @@ fn is_link_field(def: &mdbase::types::schema::FieldDef) -> bool {
         }
     }
     false
+}
+
+fn read_target_text(state: &BackendState, resolved: &std::path::Path) -> Option<String> {
+    if let Ok(uri) = Url::from_file_path(resolved) {
+        if let Some(text) = state.document_text(&uri) {
+            return Some(text);
+        }
+    }
+    std::fs::read_to_string(resolved).ok()
 }

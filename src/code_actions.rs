@@ -2,7 +2,6 @@ use tower_lsp::lsp_types::*;
 
 use mdbase::types::schema::FieldDef;
 
-use crate::collection_utils;
 use crate::state::BackendState;
 use crate::text;
 
@@ -10,10 +9,10 @@ pub(crate) fn provide(
     state: &BackendState,
     params: CodeActionParams,
 ) -> Option<CodeActionResponse> {
-    let collection = state.get_collection()?;
     let uri = &params.text_document.uri;
     let doc_text = state.document_text(uri)?;
-    let rel_path = collection_utils::rel_path_from_uri(&collection, uri)?;
+    let (ctx, rel_path) = state.context_and_rel_path_for_uri(uri)?;
+    let collection = &ctx.collection;
 
     let parsed = state
         .documents
@@ -52,7 +51,7 @@ pub(crate) fn provide(
             ..Default::default()
         }));
 
-        if let Some(def) = field_def_for_types(&collection, &type_names, field_name) {
+        if let Some(def) = field_def_for_types(collection, &type_names, field_name) {
             if let Some(values) = &def.values {
                 for value in values {
                     let new_text = yaml_value_text(field_name, value);

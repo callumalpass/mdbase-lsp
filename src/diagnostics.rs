@@ -1,8 +1,8 @@
 use tower_lsp::lsp_types::*;
 use tower_lsp::Client;
-use tracing::{debug, warn};
+use tracing::warn;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::state::BackendState;
 use crate::text;
@@ -14,28 +14,17 @@ pub async fn publish(client: &Client, state: &BackendState, uri: &Url) {
         return;
     }
 
-    let Some(collection) = state.get_collection() else {
-        warn!(uri = %uri, "diagnostics: no collection available");
+    let Some((ctx, rel_path)) = state.context_and_rel_path_for_uri(uri) else {
+        warn!(uri = %uri, "diagnostics: no collection context available");
         return;
     };
     let Some(text) = state.document_text(uri) else {
         warn!(uri = %uri, "diagnostics: no document text");
         return;
     };
-    let Ok(file_path) = uri.to_file_path() else {
-        warn!(uri = %uri, "diagnostics: cannot convert URI to file path");
-        return;
-    };
-    let rel_path = match file_path.strip_prefix(&collection.root) {
-        Ok(p) => p.to_string_lossy().to_string().replace('\\', "/"),
-        Err(_) => {
-            debug!(uri = %uri, root = %collection.root.display(), "diagnostics: file outside collection root");
-            return;
-        }
-    };
 
     let cached = state.documents.get(uri).map(|doc| doc.frontmatter());
-    let diagnostics = compute(&collection, &text, &rel_path, cached);
+    let diagnostics = compute(&ctx.collection, &text, &rel_path, cached);
     client
         .publish_diagnostics(uri.clone(), diagnostics, None)
         .await;
@@ -46,40 +35,80 @@ pub async fn publish_collection(
     client: &Client,
     state: &BackendState,
 ) -> Option<serde_json::Value> {
-    let collection = state.get_collection()?;
-    let result = collection.validate_op(&serde_json::json!({}));
-    let issues = result
-        .get("issues")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut by_path: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-    for issue in issues {
-        let path = issue_path(&issue).unwrap_or_default();
-        by_path.entry(path).or_default().push(issue);
+    let contexts = state.all_contexts();
+    if contexts.is_empty() {
+        return None;
     }
 
-    for (rel_path, file_issues) in by_path {
-        if rel_path.is_empty() {
-            continue;
+    let mut published_now = HashSet::new();
+    let mut results = Vec::new();
+
+    for ctx in contexts {
+        let result = ctx.collection.validate_op(&serde_json::json!({}));
+        let issues = result
+            .get("issues")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut by_path: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        for issue in issues {
+            let path = issue_path(&issue).unwrap_or_default();
+            by_path.entry(path).or_default().push(issue);
         }
-        let abs = collection.root.join(&rel_path);
-        let Ok(uri) = Url::from_file_path(&abs) else {
-            continue;
-        };
-        let text = if let Some(in_mem) = state.document_text(&uri) {
-            in_mem
-        } else if let Ok(on_disk) = std::fs::read_to_string(&abs) {
-            on_disk
-        } else {
-            continue;
-        };
-        let diagnostics = diagnostics_from_issues(&text, file_issues);
-        client.publish_diagnostics(uri, diagnostics, None).await;
+
+        for (rel_path, file_issues) in by_path {
+            if rel_path.is_empty() {
+                continue;
+            }
+            let abs = ctx.collection.root.join(&rel_path);
+            let Ok(uri) = Url::from_file_path(&abs) else {
+                continue;
+            };
+            let text = if let Some(in_mem) = state.document_text(&uri) {
+                in_mem
+            } else if let Ok(on_disk) = std::fs::read_to_string(&abs) {
+                on_disk
+            } else {
+                continue;
+            };
+            let diagnostics = diagnostics_from_issues(&text, file_issues);
+            client
+                .publish_diagnostics(uri.clone(), diagnostics, None)
+                .await;
+            published_now.insert(uri);
+        }
+
+        results.push(serde_json::json!({
+            "root": ctx.collection.root,
+            "result": result,
+        }));
     }
 
-    Some(result)
+    // Clear diagnostics that were published by previous collection validations
+    // but no longer appear in current results.
+    let previously_published: Vec<Url> = state
+        .collection_diagnostics_published
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+    for uri in previously_published {
+        if !published_now.contains(&uri) {
+            client
+                .publish_diagnostics(uri.clone(), Vec::new(), None)
+                .await;
+            state.collection_diagnostics_published.remove(&uri);
+        }
+    }
+    for uri in published_now {
+        state.collection_diagnostics_published.insert(uri, ());
+    }
+
+    if results.len() == 1 {
+        Some(results.remove(0).get("result").cloned().unwrap_or_default())
+    } else {
+        Some(serde_json::json!({ "collections": results }))
+    }
 }
 
 /// Compute diagnostics for a document.

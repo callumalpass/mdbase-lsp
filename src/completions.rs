@@ -1,6 +1,7 @@
 use tower_lsp::lsp_types::*;
 use tracing::{debug, warn};
 
+use crate::file_index::FileIndex;
 use crate::state::BackendState;
 use crate::text;
 
@@ -8,13 +9,11 @@ use mdbase::types::schema::FieldDef;
 
 /// Provide completions at the given position.
 pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<CompletionResponse> {
-    let collection = match state.get_collection() {
-        Some(c) => c,
-        None => {
-            warn!(uri = %uri, "completion: no collection available");
-            return None;
-        }
+    let Some((ctx, source_rel_path)) = state.context_and_rel_path_for_uri(uri) else {
+        warn!(uri = %uri, "completion: no collection context available");
+        return None;
     };
+    let collection = &ctx.collection;
     let text = match state.document_text(uri) {
         Some(t) => t,
         None => {
@@ -27,18 +26,13 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Co
     let column = position.character as usize;
 
     // Check for link completion context first — works in both body and frontmatter
-    if let Some(ctx) = text::link_completion_context(&line_text, column) {
-        let rel_path = uri.to_file_path().ok().and_then(|p| {
-            p.strip_prefix(&collection.root)
-                .ok()
-                .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
-        });
+    if let Some(link_ctx) = text::link_completion_context(&line_text, column) {
         return Some(CompletionResponse::Array(provide_link_completions(
-            state,
-            &ctx,
+            &ctx.file_index,
+            &link_ctx,
             line_idx,
             column,
-            rel_path.as_deref(),
+            Some(&source_rel_path),
         )));
     }
 
@@ -65,20 +59,15 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Co
                 debug!(uri = %uri, "completion: still invalid after removing line");
                 return None;
             }
-            let rel_path = uri.to_file_path().ok().and_then(|p| {
-                p.strip_prefix(&collection.root)
-                    .ok()
-                    .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
-            });
             let type_names =
-                collection.determine_types_for_path(&patched.json, rel_path.as_deref());
+                collection.determine_types_for_path(&patched.json, Some(&source_rel_path));
             debug!(uri = %uri, ?type_names, "completion: resolved types (patched)");
             let existing: std::collections::HashSet<String> = patched
                 .json
                 .as_object()
                 .map(|m| m.keys().cloned().collect())
                 .unwrap_or_default();
-            let fields = fields_for_types(&collection, &type_names);
+            let fields = fields_for_types(collection, &type_names);
             let items: Vec<CompletionItem> = fields
                 .into_iter()
                 .filter(|(name, _)| !existing.contains(name))
@@ -97,12 +86,7 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Co
             return None;
         }
 
-        let rel_path = uri.to_file_path().ok().and_then(|p| {
-            p.strip_prefix(&collection.root)
-                .ok()
-                .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
-        });
-        let type_names = collection.determine_types_for_path(&parsed.json, rel_path.as_deref());
+        let type_names = collection.determine_types_for_path(&parsed.json, Some(&source_rel_path));
         debug!(uri = %uri, ?type_names, "completion: resolved types");
 
         if is_field_name_pos {
@@ -111,7 +95,7 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Co
                 .as_object()
                 .map(|m| m.keys().cloned().collect())
                 .unwrap_or_default();
-            let fields = fields_for_types(&collection, &type_names);
+            let fields = fields_for_types(collection, &type_names);
             let items: Vec<CompletionItem> = fields
                 .into_iter()
                 .filter(|(name, _)| !existing.contains(name))
@@ -127,7 +111,7 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Co
 
         if let Some(field_name) = text::field_name_from_line(&line_text) {
             debug!(uri = %uri, field_name = %field_name, "completion: looking up field def for value completion");
-            if let Some(field_def) = field_def_for_types(&collection, &type_names, &field_name) {
+            if let Some(field_def) = field_def_for_types(collection, &type_names, &field_name) {
                 debug!(uri = %uri, field_name = %field_name, field_type = %field_def.field_type, has_values = field_def.values.is_some(), "completion: found field def");
                 if let Some(values) = &field_def.values {
                     let items = values
@@ -150,7 +134,7 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Co
                 }
                 if is_link_field(&field_def) {
                     let target_type = link_target_type(&field_def);
-                    let items = link_target_completions(state, target_type.as_deref());
+                    let items = link_target_completions(&ctx.file_index, target_type.as_deref());
                     return Some(CompletionResponse::Array(items));
                 }
             } else {
@@ -162,7 +146,7 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Co
     } else if column > 0 {
         let prefix = line_text.chars().take(column).collect::<String>();
         if prefix.ends_with('#') {
-            let items = tag_completions(state);
+            let items = tag_completions(&ctx.file_index);
             return Some(CompletionResponse::Array(items));
         }
     }
@@ -276,9 +260,11 @@ fn link_target_type(def: &FieldDef) -> Option<String> {
     }
 }
 
-fn link_target_completions(state: &BackendState, target_type: Option<&str>) -> Vec<CompletionItem> {
-    state
-        .file_index
+fn link_target_completions(
+    file_index: &FileIndex,
+    target_type: Option<&str>,
+) -> Vec<CompletionItem> {
+    file_index
         .link_targets(target_type)
         .into_iter()
         .map(|rel_path| CompletionItem {
@@ -299,9 +285,8 @@ fn remove_line(text: &str, line_idx: usize) -> String {
         .join("\n")
 }
 
-fn tag_completions(state: &BackendState) -> Vec<CompletionItem> {
-    state
-        .file_index
+fn tag_completions(file_index: &FileIndex) -> Vec<CompletionItem> {
+    file_index
         .tag_counts()
         .into_iter()
         .map(|(tag, count)| CompletionItem {
@@ -314,21 +299,22 @@ fn tag_completions(state: &BackendState) -> Vec<CompletionItem> {
 }
 
 fn provide_link_completions(
-    state: &BackendState,
+    file_index: &FileIndex,
     ctx: &text::LinkCompletionContext,
     line_idx: usize,
     column: usize,
     source_rel_path: Option<&str>,
 ) -> Vec<CompletionItem> {
-    let targets = state.file_index.link_targets_with_display(None);
+    let targets = file_index.link_targets_with_display(None);
     let edit_range = Range {
         start: Position::new(line_idx as u32, ctx.start_col as u32),
         end: Position::new(line_idx as u32, column as u32),
     };
+    let prefix = ctx.prefix.trim().to_lowercase();
 
-    targets
+    let mut candidates: Vec<(usize, String, CompletionItem)> = targets
         .into_iter()
-        .map(|(rel_path, display_name, preview)| match ctx.kind {
+        .filter_map(|(rel_path, display_name, preview)| match ctx.kind {
             text::LinkCompletionKind::Wikilink => {
                 let stem = rel_path.strip_suffix(".md").unwrap_or(&rel_path);
                 let label = display_name.clone().unwrap_or_else(|| stem.to_string());
@@ -347,38 +333,77 @@ fn provide_link_completions(
                         value: p,
                     })
                 });
-                CompletionItem {
-                    label,
-                    detail: Some(rel_path.clone()),
-                    kind: Some(CompletionItemKind::FILE),
-                    insert_text: Some(insert_text.clone()),
-                    filter_text,
-                    documentation,
-                    text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                        range: edit_range,
-                        new_text: insert_text,
-                    })),
-                    ..Default::default()
+                let searchable = format!(
+                    "{} {} {}",
+                    label.to_lowercase(),
+                    stem.to_lowercase(),
+                    rel_path.to_lowercase()
+                );
+                if !prefix.is_empty() && !searchable.contains(&prefix) {
+                    return None;
                 }
+                let rank = rank_match(
+                    &prefix,
+                    &label.to_lowercase(),
+                    &stem.to_lowercase(),
+                    &rel_path.to_lowercase(),
+                );
+                Some((
+                    rank,
+                    label.clone(),
+                    CompletionItem {
+                        label,
+                        detail: Some(rel_path.clone()),
+                        kind: Some(CompletionItemKind::FILE),
+                        insert_text: Some(insert_text.clone()),
+                        filter_text,
+                        documentation,
+                        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                            range: edit_range,
+                            new_text: insert_text,
+                        })),
+                        ..Default::default()
+                    },
+                ))
             }
             text::LinkCompletionKind::Markdown => {
                 let label = match source_rel_path {
                     Some(src) => relative_path_from(src, &rel_path),
                     None => rel_path.clone(),
                 };
-                CompletionItem {
-                    label: label.clone(),
-                    detail: Some(rel_path.clone()),
-                    kind: Some(CompletionItemKind::FILE),
-                    text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                        range: edit_range,
-                        new_text: label,
-                    })),
-                    ..Default::default()
+                let searchable = format!("{} {}", label.to_lowercase(), rel_path.to_lowercase());
+                if !prefix.is_empty() && !searchable.contains(&prefix) {
+                    return None;
                 }
+                let rank = rank_match(
+                    &prefix,
+                    &label.to_lowercase(),
+                    &label.to_lowercase(),
+                    &rel_path.to_lowercase(),
+                );
+                Some((
+                    rank,
+                    label.clone(),
+                    CompletionItem {
+                        label: label.clone(),
+                        detail: Some(rel_path.clone()),
+                        kind: Some(CompletionItemKind::FILE),
+                        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                            range: edit_range,
+                            new_text: label,
+                        })),
+                        ..Default::default()
+                    },
+                ))
             }
         })
-        .collect()
+        .collect();
+
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    if candidates.len() > 200 {
+        candidates.truncate(200);
+    }
+    candidates.into_iter().map(|(_, _, item)| item).collect()
 }
 
 /// Compute a relative path from `source` to `target`, where both are
@@ -403,10 +428,7 @@ fn relative_path_from(source: &str, target: &str) -> String {
         .count();
 
     let ups = src_parts.len() - common;
-    let mut parts: Vec<&str> = Vec::new();
-    for _ in 0..ups {
-        parts.push("..");
-    }
+    let mut parts: Vec<&str> = vec![".."; ups];
     for segment in &tgt_parts[common..] {
         parts.push(segment);
     }
@@ -416,4 +438,20 @@ fn relative_path_from(source: &str, target: &str) -> String {
     } else {
         parts.join("/")
     }
+}
+
+fn rank_match(prefix: &str, label: &str, stem: &str, rel_path: &str) -> usize {
+    if prefix.is_empty() {
+        return 3;
+    }
+    if label == prefix || stem == prefix || rel_path == prefix {
+        return 0;
+    }
+    if label.starts_with(prefix) || stem.starts_with(prefix) || rel_path.starts_with(prefix) {
+        return 1;
+    }
+    if label.contains(prefix) || stem.contains(prefix) || rel_path.contains(prefix) {
+        return 2;
+    }
+    4
 }

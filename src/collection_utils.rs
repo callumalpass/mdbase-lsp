@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use mdbase::Collection;
 use tower_lsp::lsp_types::Url;
-use tracing::debug;
 
 pub(crate) fn scan_collection_files(collection: &Collection) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -151,8 +150,7 @@ fn is_in_nested_collection(collection: &Collection, rel_path: &str) -> bool {
 }
 
 fn match_glob_pattern(pattern: &str, path: &str) -> bool {
-    if pattern.ends_with("/**") {
-        let prefix = &pattern[..pattern.len() - 3];
+    if let Some(prefix) = pattern.strip_suffix("/**") {
         return path.starts_with(&format!("{}/", prefix)) || path == prefix;
     }
 
@@ -171,149 +169,15 @@ fn match_glob_pattern(pattern: &str, path: &str) -> bool {
     path == pattern || path.starts_with(&format!("{}/", pattern))
 }
 
-// ---------------------------------------------------------------------------
-// Link target resolution (in-memory, no disk reads for source files)
-// ---------------------------------------------------------------------------
-
-/// Normalize path segments by resolving `.` and `..`.
-fn normalize_path_segments(path: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    for segment in path.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                if parts.is_empty() || parts.last() == Some(&"..") {
-                    parts.push("..");
-                } else {
-                    parts.pop();
-                }
-            }
-            s => parts.push(s),
-        }
-    }
-    if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    }
-}
-
-/// Resolve a link target string to an absolute path within the collection.
-///
-/// Handles relative paths (`./`, `../`), root-relative (`/foo`), exact matches,
-/// extension inference (`.md` + configured extensions), and case-insensitive
-/// stem matching for simple names.
-pub(crate) fn resolve_link_target(
-    collection: &Collection,
-    target: &str,
-    source_rel_path: Option<&str>,
-) -> Option<PathBuf> {
-    // Strip wikilink syntax if accidentally passed through
-    let target = if target.starts_with("[[") && target.ends_with("]]") {
-        let inner = &target[2..target.len() - 2];
-        inner
-            .split('|')
-            .next()
-            .unwrap_or(inner)
-            .split('#')
-            .next()
-            .unwrap_or(inner)
-            .trim()
-    } else {
-        target.split('#').next().unwrap_or(target).trim()
-    };
-
-    if target.is_empty() {
-        debug!("resolve_link_target: empty target");
-        return None;
-    }
-
-    // Build the set of known relative paths
-    let files = scan_collection_files(collection);
-    let known: Vec<String> = files
-        .iter()
-        .filter_map(|p| {
-            p.strip_prefix(&collection.root)
-                .ok()
-                .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
-        })
-        .collect();
-
-    // Resolve relative/root-relative targets to a normalized relative path
-    let resolved = if target.starts_with("./") || target.starts_with("../") {
-        let source_dir = source_rel_path
-            .and_then(|s| Path::new(s).parent())
-            .unwrap_or(Path::new(""));
-        let joined = source_dir.join(target);
-        normalize_path_segments(&joined.to_string_lossy().replace('\\', "/"))
-    } else if target.starts_with('/') {
-        target[1..].to_string()
-    } else {
-        target.to_string()
-    };
-
-    debug!(resolved = %resolved, "resolve_link_target: normalized target");
-
-    // 1. Exact match
-    if known.contains(&resolved) {
-        debug!("resolve_link_target: exact match");
-        return Some(collection.root.join(&resolved));
-    }
-
-    // 2. Extension inference — try .md, then configured extensions
-    if !resolved.contains('.')
-        || (!resolved.ends_with(".md") && !has_known_extension(collection, &resolved))
-    {
-        let with_md = format!("{}.md", resolved);
-        if known.contains(&with_md) {
-            debug!("resolve_link_target: matched with .md extension");
-            return Some(collection.root.join(&with_md));
-        }
-        for ext in &collection.settings.extensions {
-            let with_ext = format!("{}.{}", resolved, ext);
-            if known.contains(&with_ext) {
-                debug!(ext = %ext, "resolve_link_target: matched with configured extension");
-                return Some(collection.root.join(&with_ext));
-            }
-        }
-    }
-
-    // 3. Stem match — case-insensitive filename stem for simple names (no path separator)
-    if !resolved.contains('/') {
-        let target_lower = resolved.to_lowercase();
-        for rel in &known {
-            let stem = Path::new(rel)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            if stem == resolved || stem.to_lowercase() == target_lower {
-                debug!(matched = %rel, "resolve_link_target: stem match");
-                return Some(collection.root.join(rel));
-            }
-        }
-    }
-
-    debug!("resolve_link_target: no match found");
-    None
-}
-
-fn has_known_extension(collection: &Collection, path: &str) -> bool {
-    if path.ends_with(".md") {
-        return true;
-    }
-    for ext in &collection.settings.extensions {
-        if path.ends_with(&format!(".{}", ext)) {
-            return true;
-        }
-    }
-    false
-}
-
 /// Parse a frontmatter link value and extract the target string.
 ///
 /// Handles: `[[target]]`, `[[target|alias]]`, `[text](path)`, bare paths.
 pub(crate) fn parse_link_value(value: &str) -> Option<String> {
     let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let (value, _) = strip_wrapping_quotes(value);
     if value.is_empty() {
         return None;
     }
@@ -352,14 +216,7 @@ pub(crate) fn parse_link_value(value: &str) -> Option<String> {
         return None;
     }
 
-    Some(value.to_string())
-}
-
-pub(crate) fn rel_path_from_uri(collection: &Collection, uri: &Url) -> Option<String> {
-    let path = uri.to_file_path().ok()?;
-    path.strip_prefix(&collection.root)
-        .ok()
-        .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))
+    Some(value.split('#').next().unwrap_or(value).trim().to_string())
 }
 
 /// Return whether a collection-relative path should be included in indexing.
@@ -369,4 +226,36 @@ pub(crate) fn should_index_rel_path(collection: &Collection, rel_path: &str) -> 
 
 pub(crate) fn uri_from_rel_path(collection: &Collection, rel_path: &str) -> Option<Url> {
     Url::from_file_path(collection.root.join(rel_path)).ok()
+}
+
+fn strip_wrapping_quotes(value: &str) -> (&str, Option<char>) {
+    if value.len() >= 2 {
+        let first = value.as_bytes()[0] as char;
+        let last = value.as_bytes()[value.len() - 1] as char;
+        if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+            return (&value[1..value.len() - 1], Some(first));
+        }
+    }
+    (value, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_link_value_strips_quotes_and_wikilink() {
+        assert_eq!(
+            parse_link_value("\"[[notes/alice#bio|Alice]]\""),
+            Some("notes/alice".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_link_value_strips_bare_anchor() {
+        assert_eq!(
+            parse_link_value("'notes/alice.md#bio'"),
+            Some("notes/alice.md".to_string())
+        );
+    }
 }

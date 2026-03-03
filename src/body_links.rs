@@ -1,6 +1,5 @@
 /// Body link parser — finds wikilinks and markdown links in document body text
 /// with UTF-16 column offsets for LSP compatibility.
-
 /// The syntactic format of a body link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LinkFormat {
@@ -155,6 +154,7 @@ fn parse_line_links(line: &str, line_idx: usize, out: &mut Vec<BodyLink>) {
         // Markdown link: [text](path) or ![alt](path)
         if chars[i] == '[' {
             let is_image = i > 0 && chars[i - 1] == '!';
+            let bracket_open_idx = i;
             let link_start_utf16 = utf16_col(&chars, if is_image { i - 1 } else { i });
             i += 1; // skip [
                     // Find matching ]
@@ -171,13 +171,13 @@ fn parse_line_links(line: &str, line_idx: usize, out: &mut Vec<BodyLink>) {
             // text portion is between the brackets (for alias)
             // check for (path) immediately after
             if i < len && chars[i] == '(' {
-                // Extract the text portion for alias: from original [+1 to ]-1
-                let text_start = if is_image {
-                    link_start_utf16 // already accounts for !
+                let label_text = if bracket_open_idx < i.saturating_sub(1) {
+                    chars[bracket_open_idx + 1..i - 1]
+                        .iter()
+                        .collect::<String>()
                 } else {
-                    link_start_utf16
+                    String::new()
                 };
-                let _ = text_start;
 
                 i += 1; // skip (
                 let paren_start = i;
@@ -205,54 +205,13 @@ fn parse_line_links(line: &str, line_idx: usize, out: &mut Vec<BodyLink>) {
 
                 let (target, anchor) = split_anchor(path);
 
-                // Extract the link text between [ and ] for alias
-                // Walk back from paren_start-2 (which is ]) to find the [
-                // Simpler: re-scan the bracket content
-                let bracket_open = if is_image {
-                    // chars layout: ... ! [ text ] ( path )
-                    // link_start_utf16 points to !
-                    // actual [ is at link_start_utf16_chars + 1
-                    link_start_utf16 + 1 // UTF-16 offset of [
-                } else {
-                    link_start_utf16
-                };
-                let _ = bracket_open;
-                // The text between [ and ] — we already consumed it, extract from chars
-                // bracket started at the [ we skipped, ended before paren
-                // Actually let's just use the raw chars to extract text
-                let bracket_content_start = if is_image {
-                    // find the [ after !
-                    let mut j = 0;
-                    let mut utf16_count = 0;
-                    while j < chars.len() && utf16_count < link_start_utf16 {
-                        utf16_count += chars[j].len_utf16();
-                        j += 1;
-                    }
-                    j + 2 // skip ! and [
-                } else {
-                    let mut j = 0;
-                    let mut utf16_count = 0;
-                    while j < chars.len() && utf16_count < link_start_utf16 {
-                        utf16_count += chars[j].len_utf16();
-                        j += 1;
-                    }
-                    j + 1 // skip [
-                };
-                let bracket_content_end = paren_start - 2; // before ](
-                let alias = if bracket_content_start < bracket_content_end
-                    && bracket_content_end <= chars.len()
-                {
-                    let s: String = chars[bracket_content_start..bracket_content_end]
-                        .iter()
-                        .collect();
-                    let s = s.trim().to_string();
+                let alias = {
+                    let s = label_text.trim().to_string();
                     if s.is_empty() {
                         None
                     } else {
                         Some(s)
                     }
-                } else {
-                    None
                 };
 
                 if !target.is_empty() {

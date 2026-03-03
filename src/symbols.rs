@@ -7,60 +7,71 @@ pub(crate) fn workspace_symbols(
     state: &BackendState,
     query: &str,
 ) -> Option<Vec<SymbolInformation>> {
-    let collection = state.get_collection()?;
     let normalized = query.trim().to_lowercase();
     let mut symbols = Vec::new();
 
-    for entry in state.file_index.all_entries() {
-        if !matches_query(&entry, &normalized) {
-            continue;
+    for ctx in state.all_contexts() {
+        for entry in ctx.file_index.all_entries() {
+            if !matches_query(&entry, &normalized) {
+                continue;
+            }
+            let Some(uri) = collection_utils::uri_from_rel_path(&ctx.collection, &entry.rel_path)
+            else {
+                continue;
+            };
+            let name = entry
+                .display_name
+                .clone()
+                .unwrap_or_else(|| entry.rel_path.clone());
+            let detail = if entry.types.is_empty() {
+                format!("{} ({})", entry.rel_path, ctx.collection.root.display())
+            } else {
+                format!(
+                    "{} ({}) — {}",
+                    entry.rel_path,
+                    entry.types.join(", "),
+                    ctx.collection.root.display()
+                )
+            };
+            #[allow(deprecated)]
+            symbols.push(SymbolInformation {
+                name,
+                kind: SymbolKind::FILE,
+                tags: None,
+                deprecated: None,
+                location: Location {
+                    uri,
+                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                },
+                container_name: Some(detail),
+            });
         }
-        let Some(uri) = collection_utils::uri_from_rel_path(&collection, &entry.rel_path) else {
-            continue;
-        };
-        let name = entry
-            .display_name
-            .clone()
-            .unwrap_or_else(|| entry.rel_path.clone());
-        let detail = if entry.types.is_empty() {
-            entry.rel_path.clone()
-        } else {
-            format!("{} ({})", entry.rel_path, entry.types.join(", "))
-        };
-        #[allow(deprecated)]
-        symbols.push(SymbolInformation {
-            name,
-            kind: SymbolKind::FILE,
-            tags: None,
-            deprecated: None,
-            location: Location {
-                uri,
-                range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-            },
-            container_name: Some(detail),
-        });
     }
 
-    Some(symbols)
+    if symbols.is_empty() {
+        None
+    } else {
+        Some(symbols)
+    }
 }
 
 pub(crate) fn query_collection(state: &BackendState, query: &str) -> serde_json::Value {
     let normalized = query.trim().to_lowercase();
-    let matches = state
-        .file_index
-        .all_entries()
-        .into_iter()
-        .filter(|entry| matches_query(entry, &normalized))
-        .map(|entry| {
-            serde_json::json!({
-                "path": entry.rel_path,
-                "title": entry.title,
-                "id": entry.id,
-                "types": entry.types,
-                "tags": entry.tags,
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut matches = Vec::new();
+    for ctx in state.all_contexts() {
+        for entry in ctx.file_index.all_entries() {
+            if matches_query(&entry, &normalized) {
+                matches.push(serde_json::json!({
+                    "root": ctx.collection.root,
+                    "path": entry.rel_path,
+                    "title": entry.title,
+                    "id": entry.id,
+                    "types": entry.types,
+                    "tags": entry.tags,
+                }));
+            }
+        }
+    }
     serde_json::json!({
         "query": query,
         "count": matches.len(),

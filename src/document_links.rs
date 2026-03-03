@@ -7,7 +7,7 @@ use crate::state::BackendState;
 
 /// Build the `textDocument/documentLink` response for a document.
 pub(crate) fn provide(state: &BackendState, uri: &Url) -> Option<Vec<DocumentLink>> {
-    let collection = state.get_collection()?;
+    let (ctx, source_rel_path) = state.context_and_rel_path_for_uri(uri)?;
     let text = state.document_text(uri)?;
 
     let body_links = body_links::find_body_links(&text);
@@ -17,7 +17,7 @@ pub(crate) fn provide(state: &BackendState, uri: &Url) -> Option<Vec<DocumentLin
 
     let mut result = Vec::new();
     for link in &body_links {
-        if let Some(target_url) = link_resolve::resolve_body_link(&collection, uri, link) {
+        if let Some(target_url) = link_resolve::resolve_body_link(&ctx, &source_rel_path, link) {
             result.push(DocumentLink {
                 range: Range {
                     start: Position::new(link.start_line as u32, link.start_col as u32),
