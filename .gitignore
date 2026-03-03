@@ -8,3 +8,6 @@ loop.sh
 
 # Editor artifacts
 .vscode/
+
+# Local ops workspace
+.ops/
