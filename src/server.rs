@@ -60,6 +60,7 @@ impl LanguageServer for MdbaseLanguageServer {
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![
                         ":".into(), // after field name
+                        "-".into(), // list item values in frontmatter
                         "[".into(), // wikilink start
                         "(".into(), // markdown link ](
                         "#".into(), // tag

@@ -58,11 +58,50 @@ pub(crate) fn frontmatter_bounds(text: &str) -> Option<(usize, usize)> {
     Some((first_idx + 1, close_idx - 1))
 }
 
+/// Bounds for frontmatter while editing.
+///
+/// Unlike `frontmatter_bounds`, this also treats an unclosed frontmatter block
+/// (`---` at line 0 with no closing delimiter yet) as active until EOF.
+pub(crate) fn frontmatter_edit_bounds(text: &str) -> Option<(usize, usize)> {
+    let mut lines = text.lines().enumerate();
+    let (first_idx, first_line) = lines.next()?;
+    if first_line.trim_end() != "---" {
+        return None;
+    }
+    for (idx, line) in lines {
+        if line.trim_end() == "---" {
+            if idx <= first_idx + 1 {
+                return None;
+            }
+            return Some((first_idx + 1, idx - 1));
+        }
+    }
+    let last_idx = text.lines().count().saturating_sub(1);
+    if last_idx <= first_idx {
+        return None;
+    }
+    Some((first_idx + 1, last_idx))
+}
+
 pub(crate) fn is_in_frontmatter(text: &str, line: usize) -> bool {
     match frontmatter_bounds(text) {
         Some((start, end)) => line >= start && line <= end,
         None => false,
     }
+}
+
+/// True when cursor line is inside frontmatter while authoring, including when
+/// the closing `---` has not yet been typed.
+pub(crate) fn is_in_frontmatter_edit_region(text: &str, line: usize) -> bool {
+    match frontmatter_edit_bounds(text) {
+        Some((start, end)) => line >= start && line <= end,
+        None => false,
+    }
+}
+
+/// Detects frontmatter that started with `---` but has no closing delimiter.
+pub(crate) fn has_unclosed_frontmatter(text: &str) -> bool {
+    frontmatter_edit_bounds(text).is_some() && frontmatter_bounds(text).is_none()
 }
 
 pub(crate) fn field_name_from_line(line: &str) -> Option<String> {
@@ -442,5 +481,25 @@ mod tests {
         assert_eq!(value.value, "../notes/alice.md");
         assert_eq!(value.start_col, 4);
         assert_eq!(value.end_col, line.len());
+    }
+
+    #[test]
+    fn frontmatter_edit_bounds_closed_matches_inner_lines() {
+        let text = "---\ntitle: Test\ntype: note\n---\nBody";
+        assert_eq!(frontmatter_edit_bounds(text), Some((1, 2)));
+    }
+
+    #[test]
+    fn frontmatter_edit_bounds_unclosed_uses_eof() {
+        let text = "---\ntitle: Test\ntype: note";
+        assert_eq!(frontmatter_edit_bounds(text), Some((1, 2)));
+        assert!(has_unclosed_frontmatter(text));
+    }
+
+    #[test]
+    fn in_frontmatter_edit_region_true_for_unclosed() {
+        let text = "---\ntitle: Test";
+        assert!(is_in_frontmatter_edit_region(text, 1));
+        assert!(!is_in_frontmatter(text, 1));
     }
 }

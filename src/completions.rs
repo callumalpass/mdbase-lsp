@@ -36,54 +36,37 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Co
         )));
     }
 
-    let in_frontmatter = text::is_in_frontmatter(&text, line_idx);
+    let in_frontmatter = text::is_in_frontmatter(&text, line_idx)
+        || text::is_in_frontmatter_edit_region(&text, line_idx);
     if !in_frontmatter {
         debug!(uri = %uri, line = line_idx, "completion: not in frontmatter");
     }
     if in_frontmatter {
-        let colon_idx = line_text.find(':');
-        let is_field_name_pos = colon_idx.is_none() || column <= colon_idx.unwrap_or(0);
+        let is_field_name_pos = is_field_name_position(&line_text, column);
 
-        let parsed = state
-            .documents
-            .get(uri)
-            .map(|doc| doc.frontmatter())
-            .unwrap_or_else(|| text::parse_frontmatter(&text));
+        let mut parsed = if text::has_unclosed_frontmatter(&text) {
+            parse_frontmatter_for_completion(&text)
+        } else {
+            state
+                .documents
+                .get(uri)
+                .map(|doc| doc.frontmatter())
+                .unwrap_or_else(|| text::parse_frontmatter(&text))
+        };
 
-        // When typing a new field name the incomplete line makes YAML invalid.
-        // Remove the current line and re-parse so we can still offer field names.
-        if (parsed.parse_error || parsed.mapping_error) && is_field_name_pos {
-            debug!(uri = %uri, "completion: frontmatter invalid, trying with current line removed");
-            let patched = text::parse_frontmatter(&remove_line(&text, line_idx));
+        // During active edits, the current line is often temporarily invalid YAML.
+        // Remove that line and re-parse so completions can still resolve types.
+        if parsed.parse_error || parsed.mapping_error {
+            debug!(
+                uri = %uri,
+                "completion: frontmatter invalid, trying with current line removed"
+            );
+            let patched = parse_frontmatter_for_completion(&remove_line(&text, line_idx));
             if patched.parse_error || patched.mapping_error {
                 debug!(uri = %uri, "completion: still invalid after removing line");
                 return None;
             }
-            let type_names =
-                collection.determine_types_for_path(&patched.json, Some(&source_rel_path));
-            debug!(uri = %uri, ?type_names, "completion: resolved types (patched)");
-            let existing: std::collections::HashSet<String> = patched
-                .json
-                .as_object()
-                .map(|m| m.keys().cloned().collect())
-                .unwrap_or_default();
-            let fields = fields_for_types(collection, &type_names);
-            let items: Vec<CompletionItem> = fields
-                .into_iter()
-                .filter(|(name, _)| !existing.contains(name))
-                .map(|(name, def)| {
-                    let mut item = CompletionItem::new_simple(name.clone(), field_detail(&def));
-                    item.kind = Some(CompletionItemKind::FIELD);
-                    item.documentation = field_documentation(&def);
-                    item
-                })
-                .collect();
-            return Some(CompletionResponse::Array(items));
-        }
-
-        if parsed.parse_error || parsed.mapping_error {
-            debug!(uri = %uri, "completion: frontmatter parse/mapping error (value position)");
-            return None;
+            parsed = patched;
         }
 
         let type_names = collection.determine_types_for_path(&parsed.json, Some(&source_rel_path));
@@ -109,7 +92,7 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Co
             return Some(CompletionResponse::Array(items));
         }
 
-        if let Some(field_name) = text::field_name_from_line(&line_text) {
+        if let Some(field_name) = text::field_name_for_position(&text, line_idx) {
             debug!(uri = %uri, field_name = %field_name, "completion: looking up field def for value completion");
             if let Some(field_def) = field_def_for_types(collection, &type_names, &field_name) {
                 debug!(uri = %uri, field_name = %field_name, field_type = %field_def.field_type, has_values = field_def.values.is_some(), "completion: found field def");
@@ -141,7 +124,12 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Co
                 debug!(uri = %uri, field_name = %field_name, "completion: no field def found");
             }
         } else {
-            debug!(uri = %uri, line_text = %line_text, "completion: could not extract field name from line");
+            debug!(
+                uri = %uri,
+                line = line_idx,
+                line_text = %line_text,
+                "completion: could not extract field name for value position"
+            );
         }
     } else if column > 0 {
         let prefix = line_text.chars().take(column).collect::<String>();
@@ -283,6 +271,37 @@ fn remove_line(text: &str, line_idx: usize) -> String {
         .map(|(_, l)| l)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn parse_frontmatter_for_completion(text: &str) -> text::ParsedFrontmatter {
+    if !text::has_unclosed_frontmatter(text) {
+        return text::parse_frontmatter(text);
+    }
+
+    // mdbase parser treats unclosed frontmatter as "no frontmatter". For editor
+    // completion, parse against a synthetic close delimiter.
+    let mut synthetic = text.to_string();
+    if !synthetic.ends_with('\n') {
+        synthetic.push('\n');
+    }
+    synthetic.push_str("---\n");
+    text::parse_frontmatter(&synthetic)
+}
+
+fn is_field_name_position(line: &str, column: usize) -> bool {
+    if is_yaml_list_item_line(line) {
+        return false;
+    }
+    let colon_idx = line.find(':');
+    colon_idx.is_none() || column <= colon_idx.unwrap_or(0)
+}
+
+fn is_yaml_list_item_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(rest) = trimmed.strip_prefix('-') else {
+        return false;
+    };
+    rest.is_empty() || rest.chars().next().is_some_and(|c| c.is_whitespace())
 }
 
 fn tag_completions(file_index: &FileIndex) -> Vec<CompletionItem> {
@@ -454,4 +473,38 @@ fn rank_match(prefix: &str, label: &str, stem: &str, rel_path: &str) -> usize {
         return 2;
     }
     4
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_frontmatter_for_completion_parses_unclosed_frontmatter() {
+        let text = "---\ntype: task\ntitle: Demo";
+        let parsed = parse_frontmatter_for_completion(text);
+        assert!(!parsed.parse_error);
+        assert!(!parsed.mapping_error);
+        assert_eq!(
+            parsed.json.get("type").and_then(|v| v.as_str()),
+            Some("task")
+        );
+        assert_eq!(
+            parsed.json.get("title").and_then(|v| v.as_str()),
+            Some("Demo")
+        );
+    }
+
+    #[test]
+    fn field_name_position_detects_value_for_list_items() {
+        assert!(!is_field_name_position("  - note-a", 8));
+        assert!(!is_field_name_position("  - ", 4));
+    }
+
+    #[test]
+    fn field_name_position_detects_key_side_of_mapping_line() {
+        assert!(is_field_name_position("status: open", 3));
+        assert!(is_field_name_position("status", 6));
+        assert!(!is_field_name_position("status: open", 10));
+    }
 }
