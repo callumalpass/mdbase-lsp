@@ -458,9 +458,6 @@ fn provide_link_completions(
             .then_with(|| a.1.cmp(&b.1))
             .then_with(|| a.2.cmp(&b.2))
     });
-    if candidates.len() > 200 {
-        candidates.truncate(200);
-    }
     candidates.into_iter().map(|(_, _, _, item)| item).collect()
 }
 
