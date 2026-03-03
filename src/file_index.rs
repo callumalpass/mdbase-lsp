@@ -263,10 +263,27 @@ fn build_entry(
     let types = collection.determine_types_for_path(frontmatter, Some(&rel_path));
     let title = json_string(frontmatter, "title");
     let id = json_string(frontmatter, "id");
-    let display_name = title
-        .clone()
-        .or_else(|| json_string(frontmatter, "name"))
-        .or_else(|| id.clone());
+    let mut display_name = display_name_from_type_defs(&collection.types, &types, frontmatter);
+
+    if display_name.is_none() {
+        if let Some((effective_frontmatter, effective_types)) =
+            effective_frontmatter_and_types(collection, &rel_path)
+        {
+            display_name = display_name_from_type_defs(
+                &collection.types,
+                &effective_types,
+                &effective_frontmatter,
+            );
+        }
+    }
+
+    if display_name.is_none() {
+        display_name = title
+            .clone()
+            .or_else(|| json_string(frontmatter, "name"))
+            .or_else(|| id.clone());
+    }
+
     let preview = build_preview(content);
     let tags = collect_tags(content, frontmatter);
     Some(FileEntry {
@@ -323,6 +340,67 @@ fn json_string(frontmatter: &serde_json::Value, key: &str) -> Option<String> {
         None
     } else {
         Some(value.to_string())
+    }
+}
+
+fn effective_frontmatter_and_types(
+    collection: &Collection,
+    rel_path: &str,
+) -> Option<(serde_json::Value, Vec<String>)> {
+    let result = collection.read(&serde_json::json!({ "path": rel_path }));
+    if result.get("error").is_some() {
+        return None;
+    }
+
+    let frontmatter = result.get("frontmatter")?.clone();
+    let types = result
+        .get("types")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some((frontmatter, types))
+}
+
+fn display_name_from_type_defs(
+    types_map: &HashMap<String, mdbase::types::schema::TypeDef>,
+    type_names: &[String],
+    frontmatter: &serde_json::Value,
+) -> Option<String> {
+    for type_name in type_names {
+        let Some(type_def) = types_map
+            .get(type_name)
+            .or_else(|| types_map.get(&type_name.to_lowercase()))
+        else {
+            continue;
+        };
+        let Some(key) = type_def.display_name_key.as_deref() else {
+            continue;
+        };
+        let Some(value) = frontmatter.get(key).and_then(frontmatter_display_value) else {
+            continue;
+        };
+        return Some(value);
+    }
+    None
+}
+
+fn frontmatter_display_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) => Some(value.to_string()),
+        _ => None,
     }
 }
 
@@ -409,5 +487,63 @@ fn normalize_path_segments(path: &str) -> String {
         ".".to_string()
     } else {
         parts.join("/")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mdbase::types::schema::TypeDef;
+
+    #[test]
+    fn display_name_from_type_defs_uses_display_name_key() {
+        let mut types_map = HashMap::new();
+        types_map.insert(
+            "task".to_string(),
+            TypeDef {
+                name: "task".to_string(),
+                description: None,
+                extends: None,
+                strict: None,
+                filename_pattern: None,
+                path_pattern: None,
+                display_name_key: Some("title".to_string()),
+                fields: HashMap::new(),
+                match_rules: None,
+            },
+        );
+
+        let frontmatter = serde_json::json!({
+            "title": "Ship alias support",
+            "type": "task"
+        });
+        let got = display_name_from_type_defs(&types_map, &["task".to_string()], &frontmatter);
+        assert_eq!(got.as_deref(), Some("Ship alias support"));
+    }
+
+    #[test]
+    fn display_name_from_type_defs_accepts_numeric_value() {
+        let mut types_map = HashMap::new();
+        types_map.insert(
+            "invoice".to_string(),
+            TypeDef {
+                name: "invoice".to_string(),
+                description: None,
+                extends: None,
+                strict: None,
+                filename_pattern: None,
+                path_pattern: None,
+                display_name_key: Some("number".to_string()),
+                fields: HashMap::new(),
+                match_rules: None,
+            },
+        );
+
+        let frontmatter = serde_json::json!({
+            "number": 42,
+            "type": "invoice"
+        });
+        let got = display_name_from_type_defs(&types_map, &["invoice".to_string()], &frontmatter);
+        assert_eq!(got.as_deref(), Some("42"));
     }
 }
