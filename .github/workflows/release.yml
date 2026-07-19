@@ -35,10 +35,22 @@ jobs:
             archive: mdbase-lsp-win32-x64.zip
 
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: mdbase-lsp
 
     steps:
       - name: Checkout mdbase-lsp
         uses: actions/checkout@v4
+        with:
+          path: mdbase-lsp
+
+      - name: Checkout mdbase-rs
+        uses: actions/checkout@v4
+        with:
+          repository: callumalpass/mdbase-rs
+          ref: v0.3.0-rc.1
+          path: mdbase-rs
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -60,13 +72,13 @@ jobs:
           node-version: 20
 
       - name: Build extension
-        working-directory: editors/vscode
+        working-directory: mdbase-lsp/editors/vscode
         run: |
           npm ci
           npm run compile
 
       - name: Package VSIX
-        working-directory: editors/vscode
+        working-directory: mdbase-lsp/editors/vscode
         run: npx @vscode/vsce package --target ${{ matrix.vscode-target }}
 
       - name: Create binary archive (Unix)
@@ -82,13 +94,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vsix-${{ matrix.vscode-target }}
-          path: editors/vscode/*.vsix
+          path: mdbase-lsp/editors/vscode/*.vsix
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.vscode-target }}
-          path: ${{ matrix.archive }}
+          path: mdbase-lsp/${{ matrix.archive }}
 
   release:
     needs: build

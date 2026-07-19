@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "mdbase"
-version = "0.3.0-alpha.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "chrono",
  "clap",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "mdbase-lsp"
-version = "0.3.0-alpha.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "chrono",
  "dashmap 6.1.0",

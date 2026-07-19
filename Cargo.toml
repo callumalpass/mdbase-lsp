@@ -1,6 +1,6 @@
 [package]
 name = "mdbase-lsp"
-version = "0.3.0-alpha.1"
+version = "0.3.0-rc.1"
 edition = "2021"
 description = "Language Server Protocol server for mdbase collections"
 license = "MIT"
@@ -15,7 +15,7 @@ include = [
 ]
 
 [dependencies]
-mdbase = { path = "../mdbase-rs", version = "=0.3.0-alpha.1" }
+mdbase = { path = "../mdbase-rs", version = "=0.3.0-rc.1" }
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
