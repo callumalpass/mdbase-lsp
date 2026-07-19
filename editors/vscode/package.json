@@ -4,6 +4,11 @@
   "description": "Language support for mdbase markdown collections",
   "version": "0.1.0",
   "publisher": "mdbase",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/callumalpass/mdbase-lsp.git"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },

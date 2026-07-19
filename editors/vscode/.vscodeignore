@@ -1,5 +1,4 @@
-src/
-*.ts
-!*.d.ts
-*.map
+.gitignore
+src/**
 tsconfig.json
+**/*.map

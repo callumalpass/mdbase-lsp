@@ -20,12 +20,12 @@ jobs:
 
     steps:
       - name: Checkout mdbase-lsp
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: mdbase-lsp
 
       - name: Checkout mdbase-rs
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: callumalpass/mdbase-rs
           ref: v0.3.0-rc.1
@@ -49,7 +49,7 @@ jobs:
         run: cargo test
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
 
