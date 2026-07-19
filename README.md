@@ -5,16 +5,31 @@ Language Server Protocol (LSP) server for the mdbase specification. It uses
 
 ## Features
 
-- Diagnostics: frontmatter parse errors, validation issues, unknown fields
+- Diagnostics: frontmatter parse errors, v0.2 validation issues, and canonical
+  v0.3 JSON Schema diagnostics with schema locations
 - Completions: field names, enum values, booleans, link targets, tags
 - Hover: field/type info and link target preview
 - Go to definition: link targets and type definitions in `_types/`
 - Commands: `mdbase.createFile`, `mdbase.validateCollection`
 
+For v0.3 collections, document and collection validation use the canonical
+`mdbase-rs` v0.3 operation facade. LSP diagnostic `data` preserves the mdbase
+diagnostic object, including collection-relative path, field, type, and JSON
+Schema location when available. v0.2 collections continue to use the legacy
+adapter.
+
+The LSP does not claim core conformance independently. See `conformance/` for
+its diagnostic-adapter evidence and the exact upstream `mdbase-rs` claim it
+depends on.
+
 ## Requirements
 
 - Rust toolchain (stable)
 - A valid mdbase collection (folder with `mdbase.yaml`)
+
+The `0.3.0-alpha.1` development build expects `mdbase-rs` in the sibling
+`../mdbase-rs` directory. The dependency also carries the exact crate version
+so publishing can replace the local path with the released prerelease crate.
 
 ## Build
 
@@ -50,8 +65,9 @@ Example arguments:
 
 ### `mdbase.validateCollection`
 
-Validates the entire collection and returns the JSON report from
-`mdbase-rs`.
+Validates the entire collection and returns the JSON report from `mdbase-rs`.
+For v0.3 collections this is the canonical `{ valid, result, diagnostics }`
+operation envelope.
 
 ## Editor Setup
 

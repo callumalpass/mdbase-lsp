@@ -502,6 +502,8 @@ mod tests {
             "task".to_string(),
             TypeDef {
                 name: "task".to_string(),
+                kind: None,
+                version: None,
                 description: None,
                 extends: None,
                 strict: None,
@@ -510,6 +512,9 @@ mod tests {
                 display_name_key: Some("title".to_string()),
                 fields: HashMap::new(),
                 match_rules: None,
+                json_schema: None,
+                read_defaults: HashMap::new(),
+                source_path: None,
             },
         );
 
@@ -528,6 +533,8 @@ mod tests {
             "invoice".to_string(),
             TypeDef {
                 name: "invoice".to_string(),
+                kind: None,
+                version: None,
                 description: None,
                 extends: None,
                 strict: None,
@@ -536,6 +543,9 @@ mod tests {
                 display_name_key: Some("number".to_string()),
                 fields: HashMap::new(),
                 match_rules: None,
+                json_schema: None,
+                read_defaults: HashMap::new(),
+                source_path: None,
             },
         );
 

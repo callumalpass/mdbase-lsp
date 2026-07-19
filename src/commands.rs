@@ -301,11 +301,6 @@ fn strip_frontmatter_field(path: &std::path::Path, key: &str) {
 }
 
 /// Validate the entire collection and report results.
-///
-/// TODO: Implement:
-/// 1. Scan all markdown files in collection root
-/// 2. Validate each against its matched types
-/// 3. Return summary as JSON
 async fn validate_collection(
     client: &Client,
     state: &BackendState,
