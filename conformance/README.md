@@ -2,7 +2,9 @@
 
 `mdbase-lsp` does not make an independent mdbase core profile claim. It uses
 the `mdbase-rs` crate and inherits only behavior covered by that crate's
-validated `conformance/v0.3.0-alpha.1.yml` claim.
+validated `conformance/v0.3.0-rc.1.yml` claim. Canonical view records are
+ordinary schema-validated Markdown records; this adapter does not claim the
+optional `view_records` execution feature.
 
 The LSP-specific evidence is:
 
@@ -12,7 +14,7 @@ The LSP-specific evidence is:
   server pass the strict lint gate.
 - `cargo package --allow-dirty --list`: package contents exclude local
   collections and development state. `cargo package` currently stops at
-  dependency resolution because the exact `mdbase = 0.3.0-alpha.1` crate is not
+  dependency resolution because the exact `mdbase = 0.3.0-rc.1` crate is not
   published; full package verification therefore runs after the Rust core
   prerelease is available from the release registry.
 

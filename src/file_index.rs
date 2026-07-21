@@ -514,6 +514,7 @@ mod tests {
                 match_rules: None,
                 json_schema: None,
                 read_defaults: HashMap::new(),
+                lifecycle: None,
                 source_path: None,
             },
         );
@@ -545,6 +546,7 @@ mod tests {
                 match_rules: None,
                 json_schema: None,
                 read_defaults: HashMap::new(),
+                lifecycle: None,
                 source_path: None,
             },
         );
