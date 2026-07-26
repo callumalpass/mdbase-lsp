@@ -37,7 +37,7 @@ impl FileIndex {
         let mut entries = Vec::with_capacity(files.len());
 
         for path in files {
-            let rel_path = match path.strip_prefix(&collection.root) {
+            let rel_path = match path.strip_prefix(collection.root()) {
                 Ok(p) => p.to_string_lossy().to_string().replace('\\', "/"),
                 Err(_) => continue,
             };
@@ -180,7 +180,7 @@ impl FileIndex {
             if let Some(found) = lookup_exact(&data, &with_md) {
                 return Some(found);
             }
-            for ext in &collection.settings.extensions {
+            for ext in &collection.settings().extensions {
                 let with_ext = format!("{}.{}", resolved, ext);
                 if let Some(found) = lookup_exact(&data, &with_ext) {
                     return Some(found);
@@ -220,7 +220,7 @@ impl FileIndex {
         source_rel_path: Option<&str>,
     ) -> Option<std::path::PathBuf> {
         self.resolve_target_rel_path(collection, target, source_rel_path)
-            .map(|rel| collection.root.join(rel))
+            .map(|rel| collection.root().join(rel))
     }
 }
 
@@ -263,14 +263,14 @@ fn build_entry(
     let types = collection.determine_types_for_path(frontmatter, Some(&rel_path));
     let title = json_string(frontmatter, "title");
     let id = json_string(frontmatter, "id");
-    let mut display_name = display_name_from_type_defs(&collection.types, &types, frontmatter);
+    let mut display_name = display_name_from_type_defs(collection.types(), &types, frontmatter);
 
     if display_name.is_none() {
         if let Some((effective_frontmatter, effective_types)) =
             effective_frontmatter_and_types(collection, &rel_path)
         {
             display_name = display_name_from_type_defs(
-                &collection.types,
+                collection.types(),
                 &effective_types,
                 &effective_frontmatter,
             );
@@ -418,7 +418,7 @@ fn has_known_extension(collection: &Collection, path: &str) -> bool {
     if path.ends_with(".md") {
         return true;
     }
-    for ext in &collection.settings.extensions {
+    for ext in &collection.settings().extensions {
         if path.ends_with(&format!(".{}", ext)) {
             return true;
         }
@@ -514,6 +514,7 @@ mod tests {
                 match_rules: None,
                 json_schema: None,
                 read_defaults: HashMap::new(),
+                lifecycle: None,
                 source_path: None,
             },
         );
@@ -545,6 +546,7 @@ mod tests {
                 match_rules: None,
                 json_schema: None,
                 read_defaults: HashMap::new(),
+                lifecycle: None,
                 source_path: None,
             },
         );

@@ -138,11 +138,11 @@ fn make_location_response(path: &PathBuf) -> Option<GotoDefinitionResponse> {
 /// (or any type at all, when `type_names` is empty).
 fn is_link_field(collection: &mdbase::Collection, type_names: &[String], field_name: &str) -> bool {
     let types_to_check: Vec<&mdbase::types::schema::TypeDef> = if type_names.is_empty() {
-        collection.types.values().collect()
+        collection.types().values().collect()
     } else {
         type_names
             .iter()
-            .filter_map(|n| collection.types.get(n))
+            .filter_map(|n| collection.types().get(n))
             .collect()
     };
 

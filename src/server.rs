@@ -177,7 +177,7 @@ impl LanguageServer for MdbaseLanguageServer {
         let uri = &params.text_document.uri;
         if let Some((ctx, rel_path)) = self.state.context_and_rel_path_for_uri(uri) {
             if crate::collection_utils::should_index_rel_path(&ctx.collection, &rel_path) {
-                let abs_path = ctx.collection.root.join(&rel_path);
+                let abs_path = ctx.collection.root().join(&rel_path);
                 if let Ok(on_disk_text) = std::fs::read_to_string(&abs_path) {
                     ctx.file_index
                         .upsert_from_text(&ctx.collection, rel_path, &on_disk_text);
@@ -220,7 +220,7 @@ impl LanguageServer for MdbaseLanguageServer {
         // Collect unique NowOnWrite field names across all matched types
         let mut now_fields = Vec::new();
         for type_name in &type_names {
-            if let Some(type_def) = ctx.collection.types.get(type_name) {
+            if let Some(type_def) = ctx.collection.types().get(type_name) {
                 for (field_name, field_def) in &type_def.fields {
                     if matches!(
                         field_def.generated,
