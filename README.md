@@ -27,9 +27,10 @@ depends on.
 - Rust toolchain (stable)
 - A valid mdbase collection (folder with `mdbase.yaml`)
 
-The `0.3.0-rc.1` release candidate expects `mdbase-rs` in the sibling
-`../mdbase-rs` directory. The dependency also carries the exact crate version
-so publishing can replace the local path with the released prerelease crate.
+This release expects `mdbase-rs 0.4.0-rc.1` in the sibling `../mdbase-rs`
+directory. CI and release builds pin the exact qualified core revision; the
+dependency also carries the exact crate version so publishing can replace the
+local path with the released prerelease crate.
 
 ## Build
 
