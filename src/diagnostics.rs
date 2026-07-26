@@ -59,7 +59,7 @@ pub async fn publish_collection(
     let mut results = Vec::new();
 
     for ctx in contexts {
-        let (result, issues_key) = if ctx.collection.spec_profile == mdbase::SpecProfile::V03 {
+        let (result, issues_key) = if ctx.collection.spec_profile() == mdbase::SpecProfile::V03 {
             let result = ctx
                 .collection
                 .v03_operations()
@@ -88,7 +88,7 @@ pub async fn publish_collection(
             if rel_path.is_empty() {
                 continue;
             }
-            let abs = ctx.collection.root.join(&rel_path);
+            let abs = ctx.collection.root().join(&rel_path);
             let Ok(uri) = Url::from_file_path(&abs) else {
                 continue;
             };
@@ -107,7 +107,7 @@ pub async fn publish_collection(
         }
 
         results.push(serde_json::json!({
-            "root": ctx.collection.root,
+            "root": ctx.collection.root(),
             "result": result,
         }));
     }
@@ -168,9 +168,9 @@ pub(crate) fn compute(
         }];
     }
 
-    if collection.spec_profile == mdbase::SpecProfile::V03 {
+    if collection.spec_profile() == mdbase::SpecProfile::V03 {
         if is_type_file(collection, rel_path) {
-            return diagnostics_from_v03_type_file(&collection.root, text, rel_path);
+            return diagnostics_from_v03_type_file(collection.root(), text, rel_path);
         }
 
         let mut diagnostics = collection
@@ -251,7 +251,7 @@ fn compute_v03_without_collection(
 }
 
 fn is_type_file(collection: &mdbase::Collection, rel_path: &str) -> bool {
-    rel_path.starts_with(&format!("{}/", collection.settings.types_folder))
+    rel_path.starts_with(&format!("{}/", collection.settings().types_folder))
 }
 
 fn diagnostics_from_v03_type_file(

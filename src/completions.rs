@@ -131,14 +131,14 @@ fn fields_for_types(
 ) -> Vec<(String, FieldDef)> {
     let mut fields = std::collections::HashMap::new();
     if type_names.is_empty() {
-        for type_def in collection.types.values() {
+        for type_def in collection.types().values() {
             for (name, def) in &type_def.fields {
                 fields.entry(name.clone()).or_insert_with(|| def.clone());
             }
         }
     } else {
         for type_name in type_names {
-            if let Some(type_def) = collection.types.get(type_name) {
+            if let Some(type_def) = collection.types().get(type_name) {
                 for (name, def) in &type_def.fields {
                     fields.entry(name.clone()).or_insert_with(|| def.clone());
                 }
@@ -156,7 +156,7 @@ fn field_def_for_types(
     field_name: &str,
 ) -> Option<FieldDef> {
     if type_names.is_empty() {
-        for type_def in collection.types.values() {
+        for type_def in collection.types().values() {
             if let Some(def) = type_def.fields.get(field_name) {
                 return Some(def.clone());
             }
@@ -164,7 +164,7 @@ fn field_def_for_types(
         None
     } else {
         for type_name in type_names {
-            if let Some(type_def) = collection.types.get(type_name) {
+            if let Some(type_def) = collection.types().get(type_name) {
                 if let Some(def) = type_def.fields.get(field_name) {
                     return Some(def.clone());
                 }
