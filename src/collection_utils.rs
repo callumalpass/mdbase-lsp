@@ -5,7 +5,7 @@ use tower_lsp::lsp_types::Url;
 
 pub(crate) fn scan_collection_files(collection: &Collection) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    scan_dir_recursive(collection, &collection.root, &mut files);
+    scan_dir_recursive(collection, collection.root(), &mut files);
     files
 }
 
@@ -13,7 +13,7 @@ pub(crate) fn find_type_definition_path(
     collection: &Collection,
     type_name: &str,
 ) -> Option<PathBuf> {
-    let types_dir = collection.root.join(&collection.settings.types_folder);
+    let types_dir = collection.root().join(&collection.settings().types_folder);
     if !types_dir.exists() {
         return None;
     }
@@ -42,8 +42,8 @@ fn scan_dir_recursive(collection: &Collection, dir: &Path, files: &mut Vec<PathB
         let path = entry.path();
 
         if path.is_dir() {
-            if collection.settings.include_subfolders {
-                let rel = match path.strip_prefix(&collection.root) {
+            if collection.settings().include_subfolders {
+                let rel = match path.strip_prefix(collection.root()) {
                     Ok(p) => p.to_string_lossy().to_string().replace('\\', "/"),
                     Err(_) => continue,
                 };
@@ -52,7 +52,7 @@ fn scan_dir_recursive(collection: &Collection, dir: &Path, files: &mut Vec<PathB
                 }
             }
         } else if path.is_file() {
-            let rel = match path.strip_prefix(&collection.root) {
+            let rel = match path.strip_prefix(collection.root()) {
                 Ok(p) => p.to_string_lossy().to_string().replace('\\', "/"),
                 Err(_) => continue,
             };
@@ -88,7 +88,7 @@ fn is_valid_extension(collection: &Collection, path: &str) -> bool {
     if path.ends_with(".md") {
         return true;
     }
-    for ext in &collection.settings.extensions {
+    for ext in &collection.settings().extensions {
         if path.ends_with(&format!(".{}", ext)) {
             return true;
         }
@@ -97,19 +97,19 @@ fn is_valid_extension(collection: &Collection, path: &str) -> bool {
 }
 
 fn is_excluded(collection: &Collection, rel_path: &str) -> bool {
-    if rel_path.starts_with(&format!("{}/", collection.settings.types_folder))
-        || rel_path == collection.settings.types_folder
+    if rel_path.starts_with(&format!("{}/", collection.settings().types_folder))
+        || rel_path == collection.settings().types_folder
     {
         return true;
     }
 
-    if rel_path.starts_with(&format!("{}/", collection.settings.cache_folder))
-        || rel_path == collection.settings.cache_folder
+    if rel_path.starts_with(&format!("{}/", collection.settings().cache_folder))
+        || rel_path == collection.settings().cache_folder
     {
         return true;
     }
 
-    if collection.settings.cache_folder != ".mdbase"
+    if collection.settings().cache_folder != ".mdbase"
         && (rel_path.starts_with(".mdbase/") || rel_path == ".mdbase")
     {
         return true;
@@ -119,13 +119,13 @@ fn is_excluded(collection: &Collection, rel_path: &str) -> bool {
         return true;
     }
 
-    for pattern in &collection.settings.exclude {
+    for pattern in &collection.settings().exclude {
         if match_glob_pattern(pattern, rel_path) {
             return true;
         }
     }
 
-    if !collection.settings.include_subfolders && rel_path.contains('/') {
+    if !collection.settings().include_subfolders && rel_path.contains('/') {
         return true;
     }
 
@@ -141,7 +141,7 @@ fn is_in_nested_collection(collection: &Collection, rel_path: &str) -> bool {
     let mut current = PathBuf::new();
     for component in path.parent().into_iter().flat_map(|p| p.components()) {
         current.push(component);
-        let config_path = collection.root.join(&current).join("mdbase.yaml");
+        let config_path = collection.root().join(&current).join("mdbase.yaml");
         if config_path.exists() {
             return true;
         }
@@ -225,7 +225,7 @@ pub(crate) fn should_index_rel_path(collection: &Collection, rel_path: &str) -> 
 }
 
 pub(crate) fn uri_from_rel_path(collection: &Collection, rel_path: &str) -> Option<Url> {
-    Url::from_file_path(collection.root.join(rel_path)).ok()
+    Url::from_file_path(collection.root().join(rel_path)).ok()
 }
 
 fn strip_wrapping_quotes(value: &str) -> (&str, Option<char>) {

@@ -144,7 +144,7 @@ impl BackendState {
         let path = uri.to_file_path().ok()?;
         let ctx = self.context_for_uri(uri)?;
         let rel_path = path
-            .strip_prefix(&ctx.collection.root)
+            .strip_prefix(ctx.collection.root())
             .ok()
             .map(|r| r.to_string_lossy().to_string().replace('\\', "/"))?;
         Some((ctx, rel_path))
@@ -160,7 +160,7 @@ impl BackendState {
             Ok(collection) => {
                 info!(
                     root = %root.display(),
-                    types = collection.types.len(),
+                    types = collection.types().len(),
                     "context_for_root: loaded collection"
                 );
                 let collection = Arc::new(collection);

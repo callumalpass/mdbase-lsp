@@ -24,13 +24,13 @@ pub(crate) fn workspace_symbols(
                 .clone()
                 .unwrap_or_else(|| entry.rel_path.clone());
             let detail = if entry.types.is_empty() {
-                format!("{} ({})", entry.rel_path, ctx.collection.root.display())
+                format!("{} ({})", entry.rel_path, ctx.collection.root().display())
             } else {
                 format!(
                     "{} ({}) — {}",
                     entry.rel_path,
                     entry.types.join(", "),
-                    ctx.collection.root.display()
+                    ctx.collection.root().display()
                 )
             };
             #[allow(deprecated)]
@@ -62,7 +62,7 @@ pub(crate) fn query_collection(state: &BackendState, query: &str) -> serde_json:
         for entry in ctx.file_index.all_entries() {
             if matches_query(&entry, &normalized) {
                 matches.push(serde_json::json!({
-                    "root": ctx.collection.root,
+                    "root": ctx.collection.root(),
                     "path": entry.rel_path,
                     "title": entry.title,
                     "id": entry.id,

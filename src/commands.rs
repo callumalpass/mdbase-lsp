@@ -52,7 +52,7 @@ async fn type_info(
         None => return Ok(None),
     };
 
-    let type_def = match collection.types.get(&type_name) {
+    let type_def = match collection.types().get(&type_name) {
         Some(t) => t,
         None => return Ok(None),
     };
@@ -106,7 +106,7 @@ async fn create_file(
 
     if let Some(type_name) = input.get("type").and_then(|v| v.as_str()) {
         let tn_lower = type_name.to_lowercase();
-        if let Some(type_def) = collection.types.get(&tn_lower) {
+        if let Some(type_def) = collection.types().get(&tn_lower) {
             let fm = input
                 .get("frontmatter")
                 .or_else(|| input.get("fields"))
@@ -162,12 +162,12 @@ async fn create_file(
 
     let result = collection.create(&input);
     if let Some(path) = result.get("path").and_then(|v| v.as_str()) {
-        let full_path = collection.root.join(path);
+        let full_path = collection.root().join(path);
 
         // collection.create() always inserts a `type` key.  When the
         // collection uses match rules instead of explicit type keys,
         // strip the unwanted field from the written file.
-        if collection.settings.explicit_type_keys.is_empty() {
+        if collection.settings().explicit_type_keys.is_empty() {
             strip_frontmatter_field(&full_path, "type");
         }
 
@@ -189,7 +189,7 @@ async fn create_file(
 fn has_generated_in_chain(collection: &Collection, type_name: &str, field_name: &str) -> bool {
     let mut current = Some(type_name.to_string());
     while let Some(name) = current {
-        let type_def = match collection.types.get(&name) {
+        let type_def = match collection.types().get(&name) {
             Some(t) => t,
             None => break,
         };
@@ -207,7 +207,7 @@ fn has_generated_in_chain(collection: &Collection, type_name: &str, field_name: 
 fn find_filename_pattern(collection: &Collection, type_name: &str) -> Option<String> {
     let mut current = Some(type_name.to_string());
     while let Some(name) = current {
-        let type_def = collection.types.get(&name)?;
+        let type_def = collection.types().get(&name)?;
         if let Some(ref pattern) = type_def.filename_pattern {
             return Some(pattern.clone());
         }
@@ -226,7 +226,7 @@ fn generate_field_value(
 ) -> Option<serde_json::Value> {
     let mut current = Some(type_name.to_string());
     while let Some(name) = current {
-        let type_def = collection.types.get(&name)?;
+        let type_def = collection.types().get(&name)?;
         if let Some(field_def) = type_def.fields.get(field_name) {
             if let Some(strategy) = &field_def.generated {
                 return match strategy {

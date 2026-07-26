@@ -15,7 +15,7 @@ pub(crate) fn provide(state: &BackendState, params: ReferenceParams) -> Option<V
 
     let mut locations = Vec::new();
     for rel_path in files_for_search(&ctx, &source_rel) {
-        let abs = ctx.collection.root.join(&rel_path);
+        let abs = ctx.collection.root().join(&rel_path);
         let Ok(file_uri) = Url::from_file_path(&abs) else {
             continue;
         };
@@ -60,7 +60,7 @@ pub(crate) fn rename(state: &BackendState, params: RenameParams) -> Option<Works
 
     let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
     for rel_path in files_for_search(&ctx, &source_rel) {
-        let abs = ctx.collection.root.join(&rel_path);
+        let abs = ctx.collection.root().join(&rel_path);
         let Ok(file_uri) = Url::from_file_path(&abs) else {
             continue;
         };

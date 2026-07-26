@@ -68,7 +68,7 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Ho
             if let Some(field_name) = text::field_name_for_position(&text, line_idx) {
                 if field_name == "type" || field_name == "types" {
                     if let Some(type_name) = text::word_at(&line_text, column) {
-                        if let Some(type_def) = collection.types.get(&type_name.to_lowercase()) {
+                        if let Some(type_def) = collection.types().get(&type_name.to_lowercase()) {
                             return Some(type_hover(type_def));
                         }
                     }
@@ -105,7 +105,7 @@ pub fn provide(state: &BackendState, uri: &Url, position: Position) -> Option<Ho
             }),
         );
     } else if let Some(type_name) = text::word_at(&line_text, column) {
-        if let Some(type_def) = collection.types.get(&type_name.to_lowercase()) {
+        if let Some(type_def) = collection.types().get(&type_name.to_lowercase()) {
             return Some(type_hover(type_def));
         }
     }
@@ -144,7 +144,7 @@ fn build_link_hover(
     if let Some(target_rel) = resolved_rel {
         contents.push_str(&format!("**Target** `{}`", target_rel));
 
-        let resolved = ctx.collection.root.join(&target_rel);
+        let resolved = ctx.collection.root().join(&target_rel);
         if let Some(target_text) = read_target_text(state, &resolved) {
             let (effective_frontmatter, types) = effective_frontmatter_and_types(ctx, &target_rel)
                 .unwrap_or_else(|| {
@@ -230,9 +230,9 @@ fn display_name_for_types(
 ) -> Option<(String, String)> {
     for type_name in type_names {
         let Some(type_def) = collection
-            .types
+            .types()
             .get(type_name)
-            .or_else(|| collection.types.get(&type_name.to_lowercase()))
+            .or_else(|| collection.types().get(&type_name.to_lowercase()))
         else {
             continue;
         };
@@ -446,7 +446,7 @@ fn field_def_for_types(
     field_name: &str,
 ) -> Option<mdbase::types::schema::FieldDef> {
     if type_names.is_empty() {
-        for type_def in collection.types.values() {
+        for type_def in collection.types().values() {
             if let Some(def) = type_def.fields.get(field_name) {
                 return Some(def.clone());
             }
@@ -454,7 +454,7 @@ fn field_def_for_types(
         None
     } else {
         for type_name in type_names {
-            if let Some(type_def) = collection.types.get(type_name) {
+            if let Some(type_def) = collection.types().get(type_name) {
                 if let Some(def) = type_def.fields.get(field_name) {
                     return Some(def.clone());
                 }
