@@ -201,9 +201,10 @@ mod tests {
             directory.path().join("_contracts/example.note.md"),
             r#"---
 kind: mdbase.contract
+contract_type: record
 id: example.note
 version: 1.0.0
-schema:
+record_schema:
   dialect: json-schema-2020-12
   value:
     type: object

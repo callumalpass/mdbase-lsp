@@ -546,9 +546,10 @@ collecton: {}
         let (directory, _collection) = collection();
         let text = r#"---
 kind: mdbase.contract
+contract_type: record
 id: tasknotes.task
 version: latest
-schema:
+record_schema:
   dialect: json-schema-2020-12
   value:
     type: object
@@ -561,7 +562,7 @@ schema:
         );
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.code == Some(NumberOrString::String("schema_pattern".to_string()))
-                && diagnostic.range.start.line == 3
+                && diagnostic.range.start.line == 4
         }));
     }
 }
