@@ -430,8 +430,12 @@ pub(crate) fn field_name_for_position(text: &str, line_idx: usize) -> Option<Str
 
     // Direct `field: value` line
     if let Some(colon_idx) = trimmed.find(':') {
-        let name = trimmed[..colon_idx].trim();
-        if !name.is_empty() && !name.starts_with('-') {
+        let name = trimmed[..colon_idx]
+            .trim()
+            .strip_prefix('-')
+            .map(str::trim)
+            .unwrap_or_else(|| trimmed[..colon_idx].trim());
+        if !name.is_empty() {
             return Some(name.to_string());
         }
     }

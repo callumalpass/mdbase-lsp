@@ -172,6 +172,9 @@ pub(crate) fn compute(
         if is_type_file(collection, rel_path) {
             return diagnostics_from_v03_type_file(collection.root(), text, rel_path);
         }
+        if is_data_contract_file(collection, rel_path) {
+            return diagnostics_from_v03_data_contract_file(collection.root(), text, rel_path);
+        }
 
         let mut diagnostics = collection
             .validate_v03_frontmatter(&parsed.json, rel_path)
@@ -244,14 +247,24 @@ fn compute_v03_without_collection(
         .pointer("/config/settings/types_folder")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("_types");
-    if !rel_path.starts_with(&format!("{types_folder}/")) {
-        return None;
+    if rel_path.starts_with(&format!("{types_folder}/")) {
+        return Some(diagnostics_from_v03_type_file(root, text, rel_path));
     }
-    Some(diagnostics_from_v03_type_file(root, text, rel_path))
+    let contracts_folder = config
+        .pointer("/config/settings/contracts_folder")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("_contracts");
+    rel_path
+        .starts_with(&format!("{contracts_folder}/"))
+        .then(|| diagnostics_from_v03_data_contract_file(root, text, rel_path))
 }
 
 fn is_type_file(collection: &mdbase::Collection, rel_path: &str) -> bool {
     rel_path.starts_with(&format!("{}/", collection.settings().types_folder))
+}
+
+fn is_data_contract_file(collection: &mdbase::Collection, rel_path: &str) -> bool {
+    rel_path.starts_with(&format!("{}/", collection.settings().contracts_folder))
 }
 
 fn diagnostics_from_v03_type_file(
@@ -261,6 +274,21 @@ fn diagnostics_from_v03_type_file(
 ) -> Vec<Diagnostic> {
     let absolute_path = root.join(rel_path);
     match mdbase::v03::parse_type_file(text, &absolute_path, root, rel_path) {
+        Ok(_) => Vec::new(),
+        Err(diagnostics) => diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic_from_v03(text, diagnostic))
+            .collect(),
+    }
+}
+
+fn diagnostics_from_v03_data_contract_file(
+    root: &std::path::Path,
+    text: &str,
+    rel_path: &str,
+) -> Vec<Diagnostic> {
+    let absolute_path = root.join(rel_path);
+    match mdbase::v03::parse_data_contract_file(text, &absolute_path, root, rel_path) {
         Ok(_) => Vec::new(),
         Err(diagnostics) => diagnostics
             .into_iter()
@@ -511,5 +539,29 @@ collecton: {}
             Some(&serde_json::json!("tasks/linked.md"))
         );
         assert_eq!(data.get("field"), Some(&serde_json::json!("parent")));
+    }
+
+    #[test]
+    fn invalid_data_contract_is_diagnosed_without_reopening_collection() {
+        let (directory, _collection) = collection();
+        let text = r#"---
+kind: mdbase.contract
+id: tasknotes.task
+version: latest
+schema:
+  dialect: json-schema-2020-12
+  value:
+    type: object
+---
+"#;
+        let diagnostics = diagnostics_from_v03_data_contract_file(
+            directory.path(),
+            text,
+            "_contracts/tasknotes.task.md",
+        );
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == Some(NumberOrString::String("schema_pattern".to_string()))
+                && diagnostic.range.start.line == 3
+        }));
     }
 }
