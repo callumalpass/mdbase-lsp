@@ -266,9 +266,13 @@ impl LanguageServer for MdbaseLanguageServer {
             }
         }
 
-        // Reload collection when a type definition changes.
-        if uri.path().contains("/_types/") {
-            info!("type file changed, reloading collection");
+        // Reload collection when a type or data contract definition changes.
+        let changed_control_file = self
+            .state
+            .context_and_rel_path_for_uri(&uri)
+            .is_some_and(|(ctx, rel_path)| is_registry_control_file(&ctx.collection, &rel_path));
+        if changed_control_file {
+            info!("type or data contract file changed, reloading collection");
             self.state.invalidate_for_uri(&uri);
         }
 
@@ -324,7 +328,21 @@ impl LanguageServer for MdbaseLanguageServer {
                 .and_then(|s| s.to_str())
                 .map(|s| s.eq_ignore_ascii_case("mdbase.yaml"))
                 .unwrap_or(false);
-            let is_type_file = path_has_component(&path, "_types");
+            let is_registry_file = self
+                .state
+                .root_for_path(&path)
+                .and_then(|root| {
+                    let relative = path
+                        .strip_prefix(&root)
+                        .ok()?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let context = self.state.context_for_root(&root)?;
+                    Some(is_registry_control_file(&context.collection, &relative))
+                })
+                .unwrap_or_else(|| {
+                    path_has_component(&path, "_types") || path_has_component(&path, "_contracts")
+                });
 
             if is_config {
                 if let Some(parent) = path.parent() {
@@ -332,7 +350,7 @@ impl LanguageServer for MdbaseLanguageServer {
                 }
                 continue;
             }
-            if is_type_file {
+            if is_registry_file {
                 if let Some(root) = self.state.root_for_path(&path) {
                     roots_to_invalidate.insert(root);
                 }
@@ -450,6 +468,10 @@ async fn register_file_watchers(client: &Client) -> Result<()> {
                 kind: None,
             },
             FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/_contracts/**/*".to_string()),
+                kind: None,
+            },
+            FileSystemWatcher {
                 glob_pattern: GlobPattern::String("**/*.md".to_string()),
                 kind: None,
             },
@@ -484,6 +506,15 @@ fn path_has_component(path: &std::path::Path, component: &str) -> bool {
             .map(|s| s.eq_ignore_ascii_case(component))
             .unwrap_or(false)
     })
+}
+
+fn is_registry_control_file(collection: &mdbase::Collection, relative_path: &str) -> bool {
+    [
+        collection.settings().types_folder.as_str(),
+        collection.settings().contracts_folder.as_str(),
+    ]
+    .iter()
+    .any(|folder| relative_path == *folder || relative_path.starts_with(&format!("{folder}/")))
 }
 
 /// Convert an LSP `Position` (UTF-16 columns) to a rope char offset.

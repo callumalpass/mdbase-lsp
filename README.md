@@ -18,6 +18,12 @@ diagnostic object, including collection-relative path, field, type, and JSON
 Schema location when available. v0.2 collections continue to use the legacy
 adapter.
 
+Canonical `type: view` Markdown files are handled as ordinary records and get
+the same schema-backed diagnostics when the collection materializes the v0.3
+view type. The LSP does not execute named views or advertise the optional
+`view_records` feature; execution belongs to a query-capable host such as the
+TypeScript core or CLI.
+
 The LSP does not claim core conformance independently. See `conformance/` for
 its diagnostic-adapter evidence and the exact upstream `mdbase-rs` claim it
 depends on.

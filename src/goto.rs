@@ -11,6 +11,7 @@ use crate::text;
 /// Handles:
 /// - Body links: `[[wikilinks]]`, `[text](path)`, `![[embeds]]`, `![img](path)`
 /// - Frontmatter type/types fields → `_types/` definition file
+/// - Data contract IDs in a type's `implements` list → `_contracts/` definition file
 /// - Frontmatter link-type fields → resolved target file
 /// - Frontmatter list items under link-type fields
 pub fn definition(
@@ -77,6 +78,21 @@ fn definition_in_frontmatter(
     // 2. Determine the field name (handles both `field: value` and list items)
     let field_name = text::field_name_for_position(text, line_idx)?;
     debug!(field = %field_name, "goto fm: resolved field name");
+
+    if field_name == "contract"
+        && rel_path.starts_with(&format!("{}/", ctx.collection.settings().types_folder))
+    {
+        let line_text = text.lines().nth(line_idx).unwrap_or("");
+        if let Some(contract_id) = text::value_from_frontmatter_line(line_text, column) {
+            if let Some(contract_path) = crate::collection_utils::find_data_contract_definition_path(
+                &ctx.collection,
+                contract_id.trim_matches(['\'', '"']),
+            ) {
+                return make_location_response(&contract_path);
+            }
+        }
+        return None;
+    }
 
     // 3. Determine types for this document
     let parsed = state
@@ -161,4 +177,82 @@ fn is_link_field(collection: &mdbase::Collection, type_names: &[String], field_n
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use crate::state::DocumentState;
+
+    use super::*;
+
+    #[test]
+    fn contract_implementation_navigates_to_its_definition() {
+        let directory = tempfile::tempdir().expect("temp collection");
+        fs::write(
+            directory.path().join("mdbase.yaml"),
+            "spec_version: \"0.3.0\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(directory.path().join("_contracts")).unwrap();
+        fs::create_dir_all(directory.path().join("_types")).unwrap();
+        fs::write(
+            directory.path().join("_contracts/example.note.md"),
+            r#"---
+kind: mdbase.contract
+id: example.note
+version: 1.0.0
+schema:
+  dialect: json-schema-2020-12
+  value:
+    type: object
+    required: [title]
+    properties:
+      title: { type: string }
+---
+"#,
+        )
+        .unwrap();
+        let type_text = r#"---
+kind: mdbase.type
+name: note
+schema:
+  dialect: json-schema-2020-12
+  value:
+    type: object
+    required: [title]
+    properties:
+      title: { type: string }
+implements:
+  - contract: example.note
+    version: 1.0.0
+    fields:
+      title: title
+---
+"#;
+        let type_path = directory.path().join("_types/note.md");
+        fs::write(&type_path, type_text).unwrap();
+
+        let state = BackendState::new();
+        state.set_workspace_roots(vec![directory.path().to_path_buf()]);
+        let uri = Url::from_file_path(type_path).unwrap();
+        state.documents.insert(
+            uri.clone(),
+            DocumentState::new(ropey::Rope::from_str(type_text)),
+        );
+        let line = type_text
+            .lines()
+            .position(|line| line.contains("contract:"))
+            .unwrap() as u32;
+
+        let response = definition(&state, &uri, Position::new(line, 20)).unwrap();
+        let GotoDefinitionResponse::Scalar(location) = response else {
+            panic!("expected scalar definition");
+        };
+        assert_eq!(
+            location.uri,
+            Url::from_file_path(directory.path().join("_contracts/example.note.md")).unwrap()
+        );
+    }
 }

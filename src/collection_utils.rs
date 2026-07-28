@@ -28,6 +28,19 @@ pub(crate) fn find_type_definition_path(
     None
 }
 
+pub(crate) fn find_data_contract_definition_path(
+    collection: &Collection,
+    contract_id: &str,
+) -> Option<PathBuf> {
+    collection
+        .list_data_contracts()
+        .into_iter()
+        .filter(|contract| contract.id == contract_id)
+        .flat_map(|contract| contract.source_paths)
+        .map(|relative| collection.root().join(relative))
+        .min()
+}
+
 fn scan_dir_recursive(collection: &Collection, dir: &Path, files: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -99,6 +112,12 @@ fn is_valid_extension(collection: &Collection, path: &str) -> bool {
 fn is_excluded(collection: &Collection, rel_path: &str) -> bool {
     if rel_path.starts_with(&format!("{}/", collection.settings().types_folder))
         || rel_path == collection.settings().types_folder
+    {
+        return true;
+    }
+
+    if rel_path.starts_with(&format!("{}/", collection.settings().contracts_folder))
+        || rel_path == collection.settings().contracts_folder
     {
         return true;
     }

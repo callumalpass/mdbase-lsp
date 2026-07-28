@@ -2,7 +2,9 @@
 
 `mdbase-lsp` does not make an independent mdbase core profile claim. It uses
 the `mdbase-rs` crate and inherits only behavior covered by that crate's
-validated `conformance/v0.4.0-rc.1.yml` claim.
+validated `conformance/v0.4.0-rc.1.yml` claim. Canonical view records are
+ordinary schema-validated Markdown records; this adapter does not claim the
+optional `view_records` execution feature.
 
 The LSP-specific evidence is:
 
