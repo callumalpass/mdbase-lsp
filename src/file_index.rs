@@ -16,6 +16,8 @@ pub(crate) struct FileEntry {
     pub display_name: Option<String>,
     pub title: Option<String>,
     pub id: Option<String>,
+    /// Value of the field that simple wikilinks resolve by ID, when enabled.
+    pub link_id: Option<String>,
     pub preview: Option<String>,
 }
 
@@ -168,6 +170,16 @@ impl FileIndex {
         let resolved = resolve_relative_target(&target, source_rel_path);
 
         let data = self.data.read().unwrap();
+        // A simple wikilink tries ID resolution first; several records with
+        // the same ID are ambiguous and do not fall back (spec Chapter 08).
+        if !resolved.contains('/') {
+            if let Some(indices) = data.by_link_id.get(&resolved) {
+                return match indices.as_slice() {
+                    [only] => Some(data.entries[*only].rel_path.clone()),
+                    _ => None,
+                };
+            }
+        }
         if let Some(found) = lookup_exact(&data, &resolved) {
             return Some(found);
         }
@@ -192,21 +204,7 @@ impl FileIndex {
         if !resolved.contains('/') {
             let key = resolved.to_lowercase();
             if let Some(indices) = data.by_stem_lower.get(&key) {
-                if indices.is_empty() {
-                    return None;
-                }
-                // Prefer exact-case stem match, then first indexed candidate.
-                if let Some(idx) = indices.iter().copied().find(|idx| {
-                    let stem = Path::new(&data.entries[*idx].rel_path)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("");
-                    stem == resolved
-                }) {
-                    return Some(data.entries[idx].rel_path.clone());
-                }
-                let first = indices[0];
-                return Some(data.entries[first].rel_path.clone());
+                return best_filename_match(&data, indices, source_rel_path);
             }
         }
 
@@ -230,6 +228,7 @@ struct IndexData {
     by_rel_path: HashMap<String, usize>,
     by_rel_path_lower: HashMap<String, usize>,
     by_stem_lower: HashMap<String, Vec<usize>>,
+    by_link_id: HashMap<String, Vec<usize>>,
 }
 
 impl IndexData {
@@ -250,6 +249,12 @@ impl IndexData {
                 .unwrap_or("")
                 .to_lowercase();
             self.by_stem_lower.entry(stem).or_default().push(idx);
+            if let Some(link_id) = &entry.link_id {
+                self.by_link_id
+                    .entry(link_id.clone())
+                    .or_default()
+                    .push(idx);
+            }
         }
     }
 }
@@ -263,6 +268,7 @@ fn build_entry(
     let types = collection.determine_types_for_path(frontmatter, Some(&rel_path));
     let title = json_string(frontmatter, "title");
     let id = json_string(frontmatter, "id");
+    let link_id = link_id_field(collection).and_then(|field| json_string(frontmatter, field));
     let mut display_name = display_name_from_type_defs(collection.types(), &types, frontmatter);
 
     if display_name.is_none() {
@@ -293,8 +299,43 @@ fn build_entry(
         display_name,
         title,
         id,
+        link_id,
         preview,
     })
+}
+
+/// The field simple wikilinks resolve by: v0.3 uses one only when
+/// `settings.id_field` is configured; v0.2 always resolved by ID.
+fn link_id_field(collection: &Collection) -> Option<&str> {
+    let settings = collection.settings();
+    (collection.spec_profile() != mdbase::SpecProfile::V03 || settings.id_field_explicit)
+        .then_some(settings.id_field.as_str())
+}
+
+/// Choose among records sharing a filename: the linking file's folder, then
+/// the fewest path components, then alphabetical order (spec Chapter 08).
+fn best_filename_match(
+    data: &IndexData,
+    indices: &[usize],
+    source_rel_path: Option<&str>,
+) -> Option<String> {
+    let folder = |path: &str| {
+        path.rsplit_once('/')
+            .map_or("", |(parent, _)| parent)
+            .to_string()
+    };
+    let source_folder = source_rel_path.map(folder);
+    indices
+        .iter()
+        .map(|idx| data.entries[*idx].rel_path.as_str())
+        .min_by_key(|path| {
+            (
+                source_folder.as_deref() != Some(folder(path).as_str()),
+                path.split('/').count(),
+                *path,
+            )
+        })
+        .map(str::to_string)
 }
 
 fn build_preview(content: &str) -> Option<String> {
@@ -495,6 +536,62 @@ mod tests {
     use super::*;
     use mdbase::types::schema::TypeDef;
 
+    fn indexed_collection(
+        config: &str,
+        files: &[(&str, &str)],
+    ) -> (tempfile::TempDir, Collection, FileIndex) {
+        let directory = tempfile::tempdir().expect("temp collection");
+        std::fs::write(directory.path().join("mdbase.yaml"), config).unwrap();
+        for (path, content) in files {
+            let path = directory.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+        let collection = Collection::open(directory.path()).expect("open collection");
+        let index = FileIndex::new();
+        index.rebuild(&collection);
+        (directory, collection, index)
+    }
+
+    #[test]
+    fn simple_wikilinks_resolve_by_filename_unless_an_id_field_is_configured() {
+        let files = [
+            ("tasks/alice.md", "---\ntitle: Alice file\n---\n"),
+            ("tasks/other.md", "---\nid: alice\n---\n"),
+            ("people/x.md", "---\nid: shared\n---\n"),
+            ("people/y.md", "---\nid: shared\n---\n"),
+            ("notes/shared.md", "---\n---\n"),
+        ];
+        let (_dir, collection, index) = indexed_collection("spec_version: \"0.3.0\"\n", &files);
+        let resolve =
+            |target| index.resolve_target_rel_path(&collection, target, Some("tasks/child.md"));
+        assert_eq!(resolve("alice").as_deref(), Some("tasks/alice.md"));
+        assert_eq!(resolve("shared").as_deref(), Some("notes/shared.md"));
+
+        let (_dir, collection, index) = indexed_collection(
+            "spec_version: \"0.3.0\"\nsettings:\n  id_field: id\n",
+            &files,
+        );
+        let resolve =
+            |target| index.resolve_target_rel_path(&collection, target, Some("tasks/child.md"));
+        assert_eq!(resolve("alice").as_deref(), Some("tasks/other.md"));
+        // Duplicate IDs are ambiguous and do not fall back to the filename.
+        assert_eq!(resolve("shared"), None);
+    }
+
+    #[test]
+    fn filename_ties_prefer_the_same_folder_then_the_shallowest_path() {
+        let files = [
+            ("a/b/note.md", "---\n---\n"),
+            ("z/note.md", "---\n---\n"),
+            ("y/note.md", "---\n---\n"),
+        ];
+        let (_dir, collection, index) = indexed_collection("spec_version: \"0.3.0\"\n", &files);
+        let resolve = |source| index.resolve_target_rel_path(&collection, "note", Some(source));
+        assert_eq!(resolve("a/b/source.md").as_deref(), Some("a/b/note.md"));
+        assert_eq!(resolve("elsewhere/source.md").as_deref(), Some("y/note.md"));
+    }
+
     #[test]
     fn display_name_from_type_defs_uses_display_name_key() {
         let mut types_map = HashMap::new();
@@ -518,6 +615,7 @@ mod tests {
                 read_defaults: HashMap::new(),
                 lifecycle: None,
                 source_path: None,
+                source_revision: None,
             },
         );
 
@@ -552,6 +650,7 @@ mod tests {
                 read_defaults: HashMap::new(),
                 lifecycle: None,
                 source_path: None,
+                source_revision: None,
             },
         );
 

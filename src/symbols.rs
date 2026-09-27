@@ -126,6 +126,7 @@ mod tests {
             display_name: Some("Demo Note".to_string()),
             title: Some("Demo Note".to_string()),
             id: Some("abc-1".to_string()),
+            link_id: None,
             preview: None,
         }
     }
