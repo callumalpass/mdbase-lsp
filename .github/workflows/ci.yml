@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: callumalpass/mdbase-rs
-          ref: f98f58f0d669e71e8a4d98e1cfb6863598afe4ff
+          ref: 5046ab7a348acef3cd76180e643eca05a51361a5
           path: mdbase-rs
 
       - name: Install Rust
