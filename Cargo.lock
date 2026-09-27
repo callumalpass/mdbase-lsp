@@ -1152,7 +1152,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mdbase"
-version = "0.4.0-rc.4"
+version = "0.4.0-rc.5"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -1184,7 +1184,7 @@ dependencies = [
 
 [[package]]
 name = "mdbase-lsp"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 dependencies = [
  "chrono",
  "dashmap 6.1.0",
