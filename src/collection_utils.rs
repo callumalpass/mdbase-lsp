@@ -47,33 +47,26 @@ fn scan_dir_recursive(collection: &Collection, dir: &Path, files: &mut Vec<PathB
         Err(_) => return,
     };
 
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+    for entry in entries.flatten() {
         let path = entry.path();
-
+        let Some(rel) = rel_path(collection, &path) else {
+            continue;
+        };
+        // mdbase applies the discovery rules for the collection's spec version.
         if path.is_dir() {
-            if collection.settings().include_subfolders {
-                let rel = match path.strip_prefix(collection.root()) {
-                    Ok(p) => p.to_string_lossy().to_string().replace('\\', "/"),
-                    Err(_) => continue,
-                };
-                if !is_excluded(collection, &rel) {
-                    scan_dir_recursive(collection, &path, files);
-                }
+            if !collection.is_excluded_path(&rel) {
+                scan_dir_recursive(collection, &path, files);
             }
-        } else if path.is_file() {
-            let rel = match path.strip_prefix(collection.root()) {
-                Ok(p) => p.to_string_lossy().to_string().replace('\\', "/"),
-                Err(_) => continue,
-            };
-            if !is_excluded(collection, &rel) && is_valid_extension(collection, &rel) {
-                files.push(path);
-            }
+        } else if path.is_file() && collection.is_record_path(&rel) {
+            files.push(path);
         }
     }
+}
+
+fn rel_path(collection: &Collection, path: &Path) -> Option<String> {
+    path.strip_prefix(collection.root())
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
 }
 
 fn collect_type_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -95,97 +88,6 @@ fn collect_type_files(dir: &Path, out: &mut Vec<PathBuf>) {
             }
         }
     }
-}
-
-fn is_valid_extension(collection: &Collection, path: &str) -> bool {
-    if path.ends_with(".md") {
-        return true;
-    }
-    for ext in &collection.settings().extensions {
-        if path.ends_with(&format!(".{}", ext)) {
-            return true;
-        }
-    }
-    false
-}
-
-fn is_excluded(collection: &Collection, rel_path: &str) -> bool {
-    if rel_path.starts_with(&format!("{}/", collection.settings().types_folder))
-        || rel_path == collection.settings().types_folder
-    {
-        return true;
-    }
-
-    if rel_path.starts_with(&format!("{}/", collection.settings().contracts_folder))
-        || rel_path == collection.settings().contracts_folder
-    {
-        return true;
-    }
-
-    if rel_path.starts_with(&format!("{}/", collection.settings().cache_folder))
-        || rel_path == collection.settings().cache_folder
-    {
-        return true;
-    }
-
-    if collection.settings().cache_folder != ".mdbase"
-        && (rel_path.starts_with(".mdbase/") || rel_path == ".mdbase")
-    {
-        return true;
-    }
-
-    if rel_path == "mdbase.yaml" {
-        return true;
-    }
-
-    for pattern in &collection.settings().exclude {
-        if match_glob_pattern(pattern, rel_path) {
-            return true;
-        }
-    }
-
-    if !collection.settings().include_subfolders && rel_path.contains('/') {
-        return true;
-    }
-
-    if is_in_nested_collection(collection, rel_path) {
-        return true;
-    }
-
-    false
-}
-
-fn is_in_nested_collection(collection: &Collection, rel_path: &str) -> bool {
-    let path = Path::new(rel_path);
-    let mut current = PathBuf::new();
-    for component in path.parent().into_iter().flat_map(|p| p.components()) {
-        current.push(component);
-        let config_path = collection.root().join(&current).join("mdbase.yaml");
-        if config_path.exists() {
-            return true;
-        }
-    }
-    false
-}
-
-fn match_glob_pattern(pattern: &str, path: &str) -> bool {
-    if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path.starts_with(&format!("{}/", prefix)) || path == prefix;
-    }
-
-    if pattern.starts_with("*.") {
-        let ext = &pattern[1..];
-        return path.ends_with(ext);
-    }
-
-    if pattern.contains('*') {
-        let parts: Vec<&str> = pattern.split('*').collect();
-        if parts.len() == 2 {
-            return path.starts_with(parts[0]) && path.ends_with(parts[1]);
-        }
-    }
-
-    path == pattern || path.starts_with(&format!("{}/", pattern))
 }
 
 /// Parse a frontmatter link value and extract the target string.
@@ -240,7 +142,7 @@ pub(crate) fn parse_link_value(value: &str) -> Option<String> {
 
 /// Return whether a collection-relative path should be included in indexing.
 pub(crate) fn should_index_rel_path(collection: &Collection, rel_path: &str) -> bool {
-    !is_excluded(collection, rel_path) && is_valid_extension(collection, rel_path)
+    collection.is_record_path(rel_path)
 }
 
 pub(crate) fn uri_from_rel_path(collection: &Collection, rel_path: &str) -> Option<Url> {
