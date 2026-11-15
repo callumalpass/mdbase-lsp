@@ -1,3 +1,5 @@
+> **Archived (November 2026).** This language server is built on the deprecated [mdbase-rs](https://github.com/callumalpass/mdbase-rs) engine and is no longer maintained.
+
 # mdbase-lsp
 
 Language Server Protocol (LSP) server for the mdbase specification. It uses
